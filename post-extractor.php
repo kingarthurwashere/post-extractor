@@ -31,11 +31,18 @@ require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-settings.php';
 function post_extractor_init(): void {
     $api = new Post_Extractor_API();
     $api->register_routes();
-
-    $settings = new Post_Extractor_Settings();
-    $settings->init();
 }
 add_action( 'rest_api_init', 'post_extractor_init' );
+
+// Register settings on admin_init so options.php whitelists post_extractor_settings.
+// (Do not tie this to rest_api_init — if that hook does not run, saving the settings form fails.)
+add_action(
+    'admin_init',
+    static function (): void {
+        $settings = new Post_Extractor_Settings();
+        $settings->register_settings();
+    }
+);
 
 // Also boot settings (admin menu) on admin_menu hook.
 add_action( 'admin_menu', function () {

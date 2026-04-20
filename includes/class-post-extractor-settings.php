@@ -18,10 +18,6 @@ class Post_Extractor_Settings {
     const MENU_SLUG   = 'post-extractor-settings';
     const NONCE_KEY   = 'post_extractor_nonce';
 
-    public function init(): void {
-        add_action( 'admin_init', [ $this, 'register_settings' ] );
-    }
-
     public function add_menu(): void {
         add_options_page(
             __( 'Post Extractor API', 'post-extractor' ),
