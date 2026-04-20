@@ -46,6 +46,8 @@ Mirrors `/wp/v2/posts` but works across **all post types** in one call.
 | `post_type` | optional override | Filters to one type |
 | `_embed` | always `true` | Param accepted; data always embedded |
 
+**Pagination:** Requests where `page` is greater than `total_pages` return **HTTP 200** with `"posts": []` and unchanged `X-WP-Total` / `X-WP-TotalPages` headers (same as `/wp/v2` collections). `per_page` is clamped to 1–100.
+
 Response fields match WP REST `?_embed=true` exactly:
 
 ```json

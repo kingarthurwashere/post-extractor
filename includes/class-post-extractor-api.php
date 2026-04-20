@@ -81,13 +81,8 @@ class Post_Extractor_API {
             'permission_callback' => [ $this, 'check_permission' ],
         ] );
 
-        register_rest_route( self::NAMESPACE, '/posts', [
-            'methods'             => WP_REST_Server::READABLE,
-            'callback'            => [ $this, 'get_posts' ],
-            'permission_callback' => [ $this, 'check_permission' ],
-            'args'                => $this->posts_args(),
-        ] );
-
+        // Register the single-post route before the collection route so the REST
+        // server never mis-matches paths like /posts/123 (see WP REST route order).
         register_rest_route( self::NAMESPACE, '/posts/(?P<id>\d+)', [
             'methods'             => WP_REST_Server::READABLE,
             'callback'            => [ $this, 'get_single_post' ],
@@ -99,6 +94,13 @@ class Post_Extractor_API {
                     'sanitize_callback' => 'absint',
                 ],
             ],
+        ] );
+
+        register_rest_route( self::NAMESPACE, '/posts', [
+            'methods'             => WP_REST_Server::READABLE,
+            'callback'            => [ $this, 'get_posts' ],
+            'permission_callback' => [ $this, 'check_permission' ],
+            'args'                => $this->posts_args(),
         ] );
 
         register_rest_route( self::NAMESPACE, '/categories', [
@@ -126,8 +128,17 @@ class Post_Extractor_API {
             'permission_callback' => [ $this, 'check_permission' ],
             'args'                => [
                 'slug'     => [ 'required' => true, 'sanitize_callback' => 'sanitize_key' ],
-                'page'     => [ 'default' => 1,  'sanitize_callback' => 'absint' ],
-                'per_page' => [ 'default' => 20, 'sanitize_callback' => 'absint' ],
+                'page'     => [
+                    'default'           => 1,
+                    'minimum'           => 1,
+                    'sanitize_callback' => 'absint',
+                ],
+                'per_page' => [
+                    'default'           => 20,
+                    'minimum'           => 1,
+                    'maximum'           => 100,
+                    'sanitize_callback' => 'absint',
+                ],
                 'status'   => [ 'default' => 'publish' ],
             ],
         ] );
@@ -214,8 +225,7 @@ class Post_Extractor_API {
     }
 
     public function get_posts( WP_REST_Request $request ): WP_REST_Response {
-        $per_page = (int) $request->get_param( 'per_page' );
-        $page     = (int) $request->get_param( 'page' );
+        [ $per_page, $page ] = $this->normalize_pagination( $request, 10 );
         $status   = $this->parse_post_status_param( $request->get_param( 'status' ) );
         $search   = sanitize_text_field( $request->get_param( 'search' ) ?? '' );
         $sticky   = $request->get_param( 'sticky' );
@@ -256,18 +266,27 @@ class Post_Extractor_API {
         }
 
         $query = new WP_Query( $args );
-        $items = array_map( fn( $p ) => $this->format_post( $p ), $query->posts );
+
+        $total       = (int) $query->found_posts;
+        $total_pages = (int) $query->max_num_pages;
+        $items       = array_map( fn( $p ) => $this->format_post( $p ), $query->posts );
+
+        // Match WP REST / wp/v2 collections: beyond the last page return 200 with an
+        // empty `posts` array and stable X-WP-Total / X-WP-TotalPages (never 404).
+        if ( $total > 0 && $total_pages > 0 && $page > $total_pages ) {
+            $items = [];
+        }
 
         $response = rest_ensure_response( [
-            'total'       => (int) $query->found_posts,
-            'total_pages' => (int) $query->max_num_pages,
+            'total'       => $total,
+            'total_pages' => $total_pages,
             'page'        => $page,
             'per_page'    => $per_page,
             'posts'       => $items,
         ] );
 
-        $response->header( 'X-WP-Total',      $query->found_posts );
-        $response->header( 'X-WP-TotalPages', $query->max_num_pages );
+        $response->header( 'X-WP-Total',      $total );
+        $response->header( 'X-WP-TotalPages', $total_pages );
 
         return $response;
     }
@@ -326,10 +345,9 @@ class Post_Extractor_API {
     }
 
     public function get_cpt_items( WP_REST_Request $request ): WP_REST_Response {
-        $slug     = $request->get_param( 'slug' );
-        $page     = (int) $request->get_param( 'page' );
-        $per_page = (int) $request->get_param( 'per_page' );
-        $status   = $this->parse_post_status_param( $request->get_param( 'status' ) );
+        $slug = $request->get_param( 'slug' );
+        [ $per_page, $page ] = $this->normalize_pagination( $request, 20 );
+        $status = $this->parse_post_status_param( $request->get_param( 'status' ) );
 
         $query = new WP_Query( [
             'post_type'      => $slug,
@@ -340,18 +358,24 @@ class Post_Extractor_API {
             'order'          => 'DESC',
         ] );
 
-        $items = array_map( fn( $p ) => $this->format_post( $p ), $query->posts );
+        $total       = (int) $query->found_posts;
+        $total_pages = (int) $query->max_num_pages;
+        $items       = array_map( fn( $p ) => $this->format_post( $p ), $query->posts );
+
+        if ( $total > 0 && $total_pages > 0 && $page > $total_pages ) {
+            $items = [];
+        }
 
         $response = rest_ensure_response( [
             'slug'        => $slug,
             'label'       => $this->humanize( $slug ),
-            'total'       => (int) $query->found_posts,
-            'total_pages' => (int) $query->max_num_pages,
+            'total'       => $total,
+            'total_pages' => $total_pages,
             'items'       => $items,
         ] );
 
-        $response->header( 'X-WP-Total',      $query->found_posts );
-        $response->header( 'X-WP-TotalPages', $query->max_num_pages );
+        $response->header( 'X-WP-Total',      $total );
+        $response->header( 'X-WP-TotalPages', $total_pages );
 
         return $response;
     }
@@ -508,6 +532,30 @@ class Post_Extractor_API {
     // =========================================================================
 
     /**
+     * Clamp page / per_page like core REST collections (avoids WP_Query edge cases
+     * when per_page is 0 or negative).
+     *
+     * @return int[] [ per_page, page ]
+     */
+    private function normalize_pagination( WP_REST_Request $request, int $default_per_page ): array {
+        $per_raw = $request->get_param( 'per_page' );
+        $page_raw = $request->get_param( 'page' );
+
+        $per_page = absint( $per_raw );
+        if ( $per_page < 1 ) {
+            $per_page = $default_per_page;
+        }
+        $per_page = min( $per_page, 100 );
+
+        $page = absint( $page_raw );
+        if ( $page < 1 ) {
+            $page = 1;
+        }
+
+        return [ $per_page, $page ];
+    }
+
+    /**
      * Registered CPT slugs (not post/page), including types that are not public or not in REST.
      */
     private function discover_cpt_slugs(): array {
@@ -584,8 +632,17 @@ class Post_Extractor_API {
 
     private function posts_args(): array {
         return [
-            'page'       => [ 'default' => 1,         'sanitize_callback' => 'absint' ],
-            'per_page'   => [ 'default' => 10,         'sanitize_callback' => 'absint' ],
+            'page'       => [
+                'default'           => 1,
+                'minimum'           => 1,
+                'sanitize_callback' => 'absint',
+            ],
+            'per_page'   => [
+                'default'           => 10,
+                'minimum'           => 1,
+                'maximum'           => 100,
+                'sanitize_callback' => 'absint',
+            ],
             'post_type'  => [ 'default' => null ],
             'search'     => [ 'default' => '' ],
             'status'     => [ 'default' => 'publish' ],
