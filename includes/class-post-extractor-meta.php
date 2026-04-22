@@ -14,6 +14,15 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Post_Extractor_Meta {
 
     /**
+     * @param string[] $meta_key_allowlist   Exact post meta keys allowed in API output. Empty = expose none.
+     * @param string[] $acf_field_allowlist  Top-level ACF field names allowed. Empty = expose none.
+     */
+    public function __construct(
+        private array $meta_key_allowlist = [],
+        private array $acf_field_allowlist = [],
+    ) {}
+
+    /**
      * Internal meta key prefixes / patterns to skip.
      * Extend this list if you have other internal prefixes to hide.
      */
@@ -34,11 +43,16 @@ class Post_Extractor_Meta {
      * @return array<string, mixed>
      */
     public function get_meta( int $post_id ): array {
-        $raw    = get_post_meta( $post_id );
-        $result = [];
+        if ( empty( $this->meta_key_allowlist ) ) {
+            return [];
+        }
+
+        $allowed = array_flip( $this->meta_key_allowlist );
+        $raw     = get_post_meta( $post_id );
+        $result  = [];
 
         foreach ( $raw as $key => $values ) {
-            if ( $this->is_internal_key( $key ) ) {
+            if ( ! isset( $allowed[ $key ] ) || $this->is_internal_key( $key ) ) {
                 continue;
             }
 
@@ -58,31 +72,48 @@ class Post_Extractor_Meta {
      * @return array<string, mixed>
      */
     public function get_acf( int $post_id ): array {
+        if ( empty( $this->acf_field_allowlist ) ) {
+            return [];
+        }
+
         // ACF Pro / ACF Free both expose get_fields() and get_field_groups().
         if ( ! function_exists( 'get_fields' ) ) {
             return [];
         }
 
+        $allowed_flip = array_flip( $this->acf_field_allowlist );
         $field_values = get_fields( $post_id );
         if ( empty( $field_values ) || ! is_array( $field_values ) ) {
             return [];
         }
 
-        // Enrich with field labels & types from registered field groups.
-        $groups = $this->get_acf_field_groups( $post_id );
+        $filtered_values = [];
+        foreach ( $field_values as $name => $value ) {
+            if ( is_string( $name ) && isset( $allowed_flip[ $name ] ) ) {
+                $filtered_values[ $name ] = $value;
+            }
+        }
+
+        if ( empty( $filtered_values ) ) {
+            return [];
+        }
+
+        $groups = $this->get_acf_field_groups_filtered( $post_id, $allowed_flip );
 
         return [
             'groups' => $groups,
-            'values' => $field_values,
+            'values' => $filtered_values,
         ];
     }
 
     // ── Private ────────────────────────────────────────────────────────────
 
     /**
-     * Return ACF field groups applicable to a post, with field meta.
+     * Return ACF field groups applicable to a post (only allowlisted fields).
+     *
+     * @param array<string, true> $allowed_flip
      */
-    private function get_acf_field_groups( int $post_id ): array {
+    private function get_acf_field_groups_filtered( int $post_id, array $allowed_flip ): array {
         if ( ! function_exists( 'acf_get_field_groups' ) ) {
             return [];
         }
@@ -99,10 +130,24 @@ class Post_Extractor_Meta {
                 ? acf_get_fields( $group['key'] )
                 : [];
 
+            $fields = $fields ?: [];
+            $fields = array_values( array_filter(
+                $fields,
+                static function ( $field ) use ( $allowed_flip ): bool {
+                    $name = isset( $field['name'] ) && is_string( $field['name'] ) ? $field['name'] : '';
+
+                    return $name !== '' && isset( $allowed_flip[ $name ] );
+                }
+            ) );
+
+            if ( empty( $fields ) ) {
+                continue;
+            }
+
             $groups[] = [
                 'key'    => $group['key'],
                 'title'  => $group['title'],
-                'fields' => $this->format_acf_fields( $fields ?: [] ),
+                'fields' => $this->format_acf_fields( $fields ),
             ];
         }
 

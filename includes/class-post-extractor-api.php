@@ -31,6 +31,10 @@
  *
  * GET  /post-extractor/v1/cpt-sections
  *      All CPT slugs x items in one call (mirrors getCustomPostTypeSections()).
+ *
+ * GET  /post-extractor/v1/site-identity
+ *      Site name, home URL, theme custom logo, and WordPress “Site Icon” at
+ *      several sizes (App clients use [mark_url] for hub / list icons).
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -153,6 +157,12 @@ class Post_Extractor_API {
                 'status'    => [ 'default' => 'publish' ],
             ],
         ] );
+
+        register_rest_route( self::NAMESPACE, '/site-identity', [
+            'methods'             => WP_REST_Server::READABLE,
+            'callback'            => [ $this, 'get_site_identity' ],
+            'permission_callback' => [ $this, 'check_permission' ],
+        ] );
     }
 
     // =========================================================================
@@ -160,40 +170,75 @@ class Post_Extractor_API {
     // =========================================================================
 
     public function check_permission( WP_REST_Request $request ): bool|WP_Error {
-        $options       = get_option( 'post_extractor_settings', [] );
-        $api_key       = isset( $options['api_key'] ) ? (string) $options['api_key'] : '';
-        // Default on when unset (matches settings UI).
-        $require_auth  = isset( $options['require_auth'] ) ? (int) $options['require_auth'] : 1;
-
-        if ( ! $require_auth ) {
-            return true;
-        }
-
         if ( current_user_can( 'edit_posts' ) ) {
             return true;
         }
 
+        $rate = $this->enforce_rate_limit();
+        if ( is_wp_error( $rate ) ) {
+            return $rate;
+        }
+
+        $options = get_option( Post_Extractor_Settings::OPTION_KEY, [] );
+        $api_key = isset( $options['api_key'] ) ? (string) $options['api_key'] : '';
+
         if ( $api_key === '' ) {
             return new WP_Error(
                 'rest_forbidden',
-                __( 'Authentication required.', 'post-extractor' ),
+                __( 'API key is not configured. Set one under Settings → Post Extractor.', 'post-extractor' ),
                 [ 'status' => 401 ]
             );
         }
 
-        $provided = $request->get_header( 'X-PE-API-Key' )
-                    ?? $request->get_param( 'api_key' )
-                    ?? '';
+        // Header only — never accept ?api_key= (avoids query-string leaks in logs).
+        $provided = (string) $request->get_header( 'X-PE-API-Key' );
+        if ( $provided === '' ) {
+            $provided = (string) $request->get_header( 'x-pe-api-key' );
+        }
 
-        if ( hash_equals( $api_key, (string) $provided ) ) {
+        if ( hash_equals( $api_key, $provided ) ) {
             return true;
         }
 
         return new WP_Error(
             'rest_forbidden',
-            __( 'Invalid or missing API key.', 'post-extractor' ),
+            __( 'Invalid or missing API key. Send the X-PE-API-Key header only.', 'post-extractor' ),
             [ 'status' => 401 ]
         );
+    }
+
+    /**
+     * Simple per-IP rate limit (transient window). Skipped for editors (handled above).
+     */
+    private function enforce_rate_limit(): bool|WP_Error {
+        $options = get_option( Post_Extractor_Settings::OPTION_KEY, [] );
+        $limit   = isset( $options['rate_limit_per_minute'] ) ? (int) $options['rate_limit_per_minute'] : 120;
+        if ( $limit <= 0 ) {
+            return true;
+        }
+        $limit = min( $limit, 10000 );
+
+        $ip = isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( wp_unslash( (string) $_SERVER['REMOTE_ADDR'] ) ) : 'unknown';
+        $key = 'post_extractor_rl_' . md5( $ip );
+
+        $data = get_transient( $key );
+        $now  = time();
+        if ( ! is_array( $data ) || ! isset( $data['start'], $data['count'] ) || ( $now - (int) $data['start'] ) >= 60 ) {
+            $data = [ 'start' => $now, 'count' => 0 ];
+        }
+
+        ++$data['count'];
+        set_transient( $key, $data, 60 );
+
+        if ( $data['count'] > $limit ) {
+            return new WP_Error(
+                'rest_too_many_requests',
+                __( 'Too many requests. Try again in a minute.', 'post-extractor' ),
+                [ 'status' => 429 ]
+            );
+        }
+
+        return true;
     }
 
     // =========================================================================
@@ -226,7 +271,6 @@ class Post_Extractor_API {
 
     public function get_posts( WP_REST_Request $request ): WP_REST_Response {
         [ $per_page, $page ] = $this->normalize_pagination( $request, 10 );
-        $fetch_all = filter_var( $request->get_param( 'all' ), FILTER_VALIDATE_BOOLEAN );
         $status   = $this->parse_post_status_param( $request->get_param( 'status' ) );
         $search   = sanitize_text_field( $request->get_param( 'search' ) ?? '' );
         $sticky   = $request->get_param( 'sticky' );
@@ -239,8 +283,8 @@ class Post_Extractor_API {
         $args = [
             'post_type'      => $post_types,
             'post_status'    => $status,
-            'posts_per_page' => $fetch_all ? -1 : $per_page,
-            'paged'          => $fetch_all ? 1 : $page,
+            'posts_per_page' => $per_page,
+            'paged'          => $page,
             'orderby'        => sanitize_key( $request->get_param( 'orderby' ) ?: 'date' ),
             'order'          => strtoupper( $request->get_param( 'order' ) ?: 'DESC' ) === 'ASC' ? 'ASC' : 'DESC',
         ];
@@ -269,7 +313,7 @@ class Post_Extractor_API {
         $query = new WP_Query( $args );
 
         $total       = (int) $query->found_posts;
-        $total_pages = $fetch_all ? ( $total > 0 ? 1 : 0 ) : (int) $query->max_num_pages;
+        $total_pages = (int) $query->max_num_pages;
         $items       = array_map( fn( $p ) => $this->format_post( $p ), $query->posts );
 
         // Match WP REST / wp/v2 collections: beyond the last page return 200 with an
@@ -282,7 +326,7 @@ class Post_Extractor_API {
             'total'       => $total,
             'total_pages' => $total_pages,
             'page'        => $page,
-            'per_page'    => $fetch_all ? $total : $per_page,
+            'per_page'    => $per_page,
             'posts'       => $items,
         ] );
 
@@ -303,7 +347,7 @@ class Post_Extractor_API {
             );
         }
 
-        $meta = new Post_Extractor_Meta();
+        $meta = $this->build_meta();
 
         return rest_ensure_response( array_merge(
             $this->format_post( $post ),
@@ -410,6 +454,114 @@ class Post_Extractor_API {
         }
 
         return rest_ensure_response( $sections );
+    }
+
+    /**
+     * WordPress “Site Icon” (Customizer) + theme custom logo — best URLs for mobile clients.
+     * Response is cacheable (short TTL) and inexpensive to build.
+     */
+    public function get_site_identity( WP_REST_Request $request ): WP_REST_Response {
+        $cache_key   = 'post_pe_site_id_v1';
+        $transient   = get_transient( $cache_key );
+        $bypass      = (string) $request->get_param( 'bypass_cache' ) === '1';
+        if ( is_array( $transient ) && ! $bypass ) {
+            $response = rest_ensure_response( $transient );
+        } else {
+            $data     = $this->build_site_identity_payload();
+            $transient = $data;
+            set_transient( $cache_key, $transient, HOUR_IN_SECONDS );
+            $response = rest_ensure_response( $data );
+        }
+
+        $response->header( 'Cache-Control', 'public, max-age=600' );
+
+        return $response;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function build_site_identity_payload(): array {
+        $home     = home_url( '/' );
+        $site_url = (string) get_option( 'siteurl' );
+        if ( $site_url === '' ) {
+            $site_url = $home;
+        }
+        $name     = (string) get_bloginfo( 'name' );
+        $home_u   = esc_url( $home );
+        $site_u   = esc_url( $site_url );
+
+        $custom_logo_url = '';
+        $logo_id         = (int) get_theme_mod( 'custom_logo' );
+        if ( $logo_id > 0 ) {
+            $raw = wp_get_attachment_image_url( $logo_id, 'full' );
+            if ( is_string( $raw ) && $raw !== '' ) {
+                $custom_logo_url = esc_url( $raw );
+            }
+        }
+
+        // Vector logos (SVG) are common in themes but mobile apps often expect bitmaps only.
+        $custom_logo_for_mark = $custom_logo_url;
+        if ( $logo_id > 0 ) {
+            $mime = (string) get_post_mime_type( $logo_id );
+            if ( $mime === 'image/svg+xml' || preg_match( '/\.svg(\?|#|$)/i', $custom_logo_for_mark ) ) {
+                $custom_logo_for_mark = '';
+            }
+        }
+
+        $favicon_guess = $home_u;
+        if ( is_string( $favicon_guess ) && $favicon_guess !== '' ) {
+            $favicon_guess = rtrim( $favicon_guess, '/' ) . '/favicon.ico';
+        } else {
+            $favicon_guess = $site_u . '/favicon.ico';
+        }
+
+        $sizes   = [ 32, 64, 128, 192, 256, 512 ];
+        $icons   = [];
+        $has_pe  = ( (int) get_option( 'site_icon' ) ) > 0;
+        foreach ( $sizes as $px ) {
+            $u = (string) get_site_icon_url( $px, '' );
+            if ( $u !== '' ) {
+                $icons[ (string) $px ] = $u;
+            }
+        }
+
+        if ( ! $has_pe && $favicon_guess !== '' ) {
+            $icons['favicon_ico'] = $favicon_guess;
+        }
+
+        $mark_url = $custom_logo_for_mark;
+        $source   = 'custom_logo';
+        if ( $mark_url === '' && isset( $icons['192'] ) ) {
+            $mark_url = $icons['192'];
+            $source   = 'site_icon';
+        } elseif ( $mark_url === '' && isset( $icons['512'] ) ) {
+            $mark_url = $icons['512'];
+            $source   = 'site_icon';
+        } elseif ( $mark_url === '' && isset( $icons['256'] ) ) {
+            $mark_url = $icons['256'];
+            $source   = 'site_icon';
+        } elseif ( $mark_url === '' && ! empty( $icons ) ) {
+            $mark_url = (string) reset( $icons );
+            $source   = 'site_icon';
+        } elseif ( $mark_url === '' && $favicon_guess !== '' ) {
+            $mark_url = $favicon_guess;
+            $source   = 'favicon_guess';
+        }
+        if ( $mark_url === '' ) {
+            $source = 'none';
+        }
+
+        return [
+            'name'         => $name,
+            'home'         => $home_u,
+            'siteurl'      => $site_u,
+            'mark_url'     => $mark_url,
+            'mark_source'  => $source,
+            'custom_logo'  => $custom_logo_url === '' ? null : $custom_logo_url,
+            'icons'        => $icons,
+            'version'      => 1,
+        ];
     }
 
     // =========================================================================
@@ -657,6 +809,42 @@ class Post_Extractor_API {
         return array_map( fn( $t ) => $t->term_id, $terms );
     }
 
+    private function build_meta(): Post_Extractor_Meta {
+        $opts = get_option( Post_Extractor_Settings::OPTION_KEY, [] );
+
+        return new Post_Extractor_Meta(
+            $this->parse_allowlist_tokens( (string) ( $opts['meta_keys_allowlist'] ?? '' ) ),
+            $this->parse_allowlist_tokens( (string) ( $opts['acf_field_names_allowlist'] ?? '' ) )
+        );
+    }
+
+    /**
+     * One token per line or comma-separated. Only safe key characters allowed.
+     *
+     * @return string[]
+     */
+    private function parse_allowlist_tokens( string $raw ): array {
+        $raw   = str_replace( [ "\r\n", "\r" ], "\n", $raw );
+        $parts = preg_split( '/[\n,]+/', $raw, -1, PREG_SPLIT_NO_EMPTY );
+        if ( ! is_array( $parts ) ) {
+            return [];
+        }
+
+        $seen = [];
+        foreach ( $parts as $p ) {
+            $t = trim( (string) $p );
+            if ( $t === '' || strlen( $t ) > 191 ) {
+                continue;
+            }
+            if ( ! preg_match( '/^[a-zA-Z0-9_\-]+$/', $t ) ) {
+                continue;
+            }
+            $seen[ $t ] = true;
+        }
+
+        return array_keys( $seen );
+    }
+
     private function build_tax_query( mixed $param ): array {
         if ( empty( $param ) || ! is_array( $param ) ) {
             return [];
@@ -693,9 +881,7 @@ class Post_Extractor_API {
             'categories' => [ 'default' => null,       'sanitize_callback' => 'absint' ],
             'sticky'     => [ 'default' => null ],
             'tax'        => [ 'default' => null ],
-            'all'        => [ 'default' => false ],
             '_embed'     => [ 'default' => false ],
-            'api_key'    => [ 'default' => '' ],
         ];
     }
 }

@@ -42,7 +42,21 @@ class Post_Extractor_Settings {
         $clean = [];
 
         $clean['api_key']      = sanitize_text_field( $input['api_key'] ?? '' );
-        $clean['require_auth'] = ! empty( $input['require_auth'] ) ? 1 : 0;
+        // Authentication cannot be disabled (security).
+        $clean['require_auth'] = 1;
+
+        $clean['meta_keys_allowlist'] = isset( $input['meta_keys_allowlist'] )
+            ? sanitize_textarea_field( $input['meta_keys_allowlist'] )
+            : '';
+
+        $clean['acf_field_names_allowlist'] = isset( $input['acf_field_names_allowlist'] )
+            ? sanitize_textarea_field( $input['acf_field_names_allowlist'] )
+            : '';
+
+        $clean['rate_limit_per_minute'] = 120;
+        if ( isset( $input['rate_limit_per_minute'] ) && $input['rate_limit_per_minute'] !== '' ) {
+            $clean['rate_limit_per_minute'] = max( 0, min( 10000, absint( $input['rate_limit_per_minute'] ) ) );
+        }
 
         return $clean;
     }
@@ -65,8 +79,11 @@ class Post_Extractor_Settings {
 
         $options      = get_option( self::OPTION_KEY, [] );
         $api_key      = $options['api_key']      ?? '';
-        $require_auth = $options['require_auth']  ?? 1;
         $base_url     = rest_url( 'post-extractor/v1' );
+        $meta_allow   = $options['meta_keys_allowlist'] ?? '';
+        $acf_allow    = $options['acf_field_names_allowlist'] ?? '';
+        $rate_limit   = isset( $options['rate_limit_per_minute'] ) ? (int) $options['rate_limit_per_minute'] : 120;
+        $wp_core_groups = $this->discover_wp_core_endpoint_groups();
 
         ?>
         <div class="wrap">
@@ -98,13 +115,55 @@ class Post_Extractor_Settings {
                         <td><code><?php echo esc_url( $base_url . '/posts/{id}' ); ?></code></td>
                         <td><?php esc_html_e( 'Single post with sections, meta, ACF, taxonomies, featured image', 'post-extractor' ); ?></td>
                     </tr>
+                    <tr>
+                        <td><code>GET</code></td>
+                        <td><code><?php echo esc_url( $base_url . '/site-identity' ); ?></code></td>
+                        <td><?php esc_html_e( 'Site name, URLs, theme custom logo, Site Icon (multiple sizes), and mark_url for mobile apps', 'post-extractor' ); ?></td>
+                    </tr>
                 </tbody>
             </table>
+
+            <h2 style="margin-top:20px"><?php esc_html_e( 'WordPress Core REST Endpoints (wp/v2)', 'post-extractor' ); ?></h2>
+            <p class="description" style="max-width:780px">
+                <?php esc_html_e( 'These endpoints are provided by WordPress core and active plugins/themes on this site.', 'post-extractor' ); ?>
+            </p>
+            <?php if ( empty( $wp_core_groups ) ) : ?>
+                <table class="widefat striped" style="max-width:780px">
+                    <tbody>
+                        <tr>
+                            <td><?php esc_html_e( 'No wp/v2 endpoints found.', 'post-extractor' ); ?></td>
+                        </tr>
+                    </tbody>
+                </table>
+            <?php else : ?>
+                <?php foreach ( $wp_core_groups as $group_name => $rows ) : ?>
+                    <h3 style="margin-top:16px"><?php echo esc_html( strtoupper( $group_name ) ); ?></h3>
+                    <table class="widefat striped" style="max-width:780px; margin-bottom:12px">
+                        <thead>
+                            <tr>
+                                <th><?php esc_html_e( 'Method(s)', 'post-extractor' ); ?></th>
+                                <th><?php esc_html_e( 'Endpoint', 'post-extractor' ); ?></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ( $rows as $row ) : ?>
+                                <tr>
+                                    <td><code><?php echo esc_html( $row['methods'] ); ?></code></td>
+                                    <td><code><?php echo esc_url( $row['url'] ); ?></code></td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                <?php endforeach; ?>
+            <?php endif; ?>
 
             <hr>
 
             <!-- ── Settings Form ─────────────────────────────────────── -->
             <h2><?php esc_html_e( 'Settings', 'post-extractor' ); ?></h2>
+            <p class="description" style="max-width:780px">
+                <?php esc_html_e( 'All Post Extractor REST requests require a valid API key via the X-PE-API-Key HTTP header only. Logged-in users with edit_posts may call endpoints without the key.', 'post-extractor' ); ?>
+            </p>
             <form method="post" action="options.php">
                 <?php settings_fields( self::OPTION_KEY ); ?>
                 <table class="form-table" style="max-width:780px">
@@ -119,22 +178,51 @@ class Post_Extractor_Settings {
                                 autocomplete="off"
                             />
                             <p class="description">
-                                <?php esc_html_e( 'Send this key as the X-PE-API-Key header or ?api_key= query parameter.', 'post-extractor' ); ?>
+                                <?php esc_html_e( 'Send only as the X-PE-API-Key header. Query-string keys are not accepted.', 'post-extractor' ); ?>
                             </p>
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e( 'Require Authentication', 'post-extractor' ); ?></th>
+                        <th scope="row"><?php esc_html_e( 'Rate limit', 'post-extractor' ); ?></th>
                         <td>
-                            <label>
-                                <input
-                                    type="checkbox"
-                                    name="<?php echo esc_attr( self::OPTION_KEY ); ?>[require_auth]"
-                                    value="1"
-                                    <?php checked( 1, $require_auth ); ?>
-                                />
-                                <?php esc_html_e( 'Require API key or logged-in editor for all requests', 'post-extractor' ); ?>
-                            </label>
+                            <input
+                                type="number"
+                                name="<?php echo esc_attr( self::OPTION_KEY ); ?>[rate_limit_per_minute]"
+                                value="<?php echo esc_attr( (string) $rate_limit ); ?>"
+                                class="small-text"
+                                min="0"
+                                max="10000"
+                                step="1"
+                            />
+                            <p class="description">
+                                <?php esc_html_e( 'Max requests per IP per minute for API-key clients. Use 0 to disable. Editors are not rate-limited.', 'post-extractor' ); ?>
+                            </p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php esc_html_e( 'Post meta allowlist', 'post-extractor' ); ?></th>
+                        <td>
+                            <textarea
+                                name="<?php echo esc_attr( self::OPTION_KEY ); ?>[meta_keys_allowlist]"
+                                rows="6"
+                                class="large-text code"
+                            ><?php echo esc_textarea( $meta_allow ); ?></textarea>
+                            <p class="description">
+                                <?php esc_html_e( 'One meta key per line or comma-separated. Only these keys are returned on single-post requests. Letters, numbers, hyphen, underscore only. Empty = expose no custom post meta.', 'post-extractor' ); ?>
+                            </p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php esc_html_e( 'ACF field allowlist', 'post-extractor' ); ?></th>
+                        <td>
+                            <textarea
+                                name="<?php echo esc_attr( self::OPTION_KEY ); ?>[acf_field_names_allowlist]"
+                                rows="6"
+                                class="large-text code"
+                            ><?php echo esc_textarea( $acf_allow ); ?></textarea>
+                            <p class="description">
+                                <?php esc_html_e( 'Top-level ACF field names (as in get_fields()) to expose. Same format as meta allowlist. Empty = expose no ACF data.', 'post-extractor' ); ?>
+                            </p>
                         </td>
                     </tr>
                 </table>
@@ -179,5 +267,79 @@ echo esc_html(
             ?></code></pre>
         </div>
         <?php
+    }
+
+    /**
+     * Discover registered wp/v2 routes from the active REST server and group
+     * them by top-level resource (posts, users, categories, etc.).
+     *
+     * @return array<string, array<int, array{methods: string, url: string}>>
+     */
+    private function discover_wp_core_endpoint_groups(): array {
+        $server = rest_get_server();
+        if ( ! $server ) {
+            return [];
+        }
+
+        $routes = $server->get_routes();
+        $groups = [];
+
+        foreach ( $routes as $route => $handlers ) {
+            if ( ! is_string( $route ) || strpos( $route, '/wp/v2/' ) !== 0 ) {
+                continue;
+            }
+
+            $methods = [];
+            if ( is_array( $handlers ) ) {
+                foreach ( $handlers as $handler ) {
+                    if ( ! is_array( $handler ) || empty( $handler['methods'] ) ) {
+                        continue;
+                    }
+                    $m = $handler['methods'];
+                    if ( is_array( $m ) ) {
+                        foreach ( array_keys( $m ) as $mk ) {
+                            $methods[] = strtoupper( (string) $mk );
+                        }
+                    } else {
+                        $methods[] = strtoupper( (string) $m );
+                    }
+                }
+            }
+
+            $methods = array_values( array_unique( array_filter( $methods ) ) );
+            sort( $methods );
+
+            $resource = $this->extract_wp_v2_resource_group( $route );
+            if ( ! isset( $groups[ $resource ] ) ) {
+                $groups[ $resource ] = [];
+            }
+
+            $groups[ $resource ][] = [
+                'methods' => empty( $methods ) ? 'GET' : implode( ', ', $methods ),
+                'url'     => rest_url( ltrim( $route, '/' ) ),
+            ];
+        }
+
+        ksort( $groups );
+        foreach ( $groups as $group_key => $rows ) {
+            usort(
+                $rows,
+                static fn( array $a, array $b ): int => strcmp( $a['url'], $b['url'] )
+            );
+            $groups[ $group_key ] = $rows;
+        }
+
+        return $groups;
+    }
+
+    private function extract_wp_v2_resource_group( string $route ): string {
+        $trimmed = trim( $route, '/' );
+        $parts   = explode( '/', $trimmed );
+        if ( count( $parts ) < 3 ) {
+            return 'misc';
+        }
+
+        $resource = sanitize_key( (string) $parts[2] );
+        return $resource !== '' ? $resource : 'misc';
     }
 }
