@@ -226,6 +226,7 @@ class Post_Extractor_API {
 
     public function get_posts( WP_REST_Request $request ): WP_REST_Response {
         [ $per_page, $page ] = $this->normalize_pagination( $request, 10 );
+        $fetch_all = filter_var( $request->get_param( 'all' ), FILTER_VALIDATE_BOOLEAN );
         $status   = $this->parse_post_status_param( $request->get_param( 'status' ) );
         $search   = sanitize_text_field( $request->get_param( 'search' ) ?? '' );
         $sticky   = $request->get_param( 'sticky' );
@@ -238,8 +239,8 @@ class Post_Extractor_API {
         $args = [
             'post_type'      => $post_types,
             'post_status'    => $status,
-            'posts_per_page' => $per_page,
-            'paged'          => $page,
+            'posts_per_page' => $fetch_all ? -1 : $per_page,
+            'paged'          => $fetch_all ? 1 : $page,
             'orderby'        => sanitize_key( $request->get_param( 'orderby' ) ?: 'date' ),
             'order'          => strtoupper( $request->get_param( 'order' ) ?: 'DESC' ) === 'ASC' ? 'ASC' : 'DESC',
         ];
@@ -268,7 +269,7 @@ class Post_Extractor_API {
         $query = new WP_Query( $args );
 
         $total       = (int) $query->found_posts;
-        $total_pages = (int) $query->max_num_pages;
+        $total_pages = $fetch_all ? ( $total > 0 ? 1 : 0 ) : (int) $query->max_num_pages;
         $items       = array_map( fn( $p ) => $this->format_post( $p ), $query->posts );
 
         // Match WP REST / wp/v2 collections: beyond the last page return 200 with an
@@ -281,7 +282,7 @@ class Post_Extractor_API {
             'total'       => $total,
             'total_pages' => $total_pages,
             'page'        => $page,
-            'per_page'    => $per_page,
+            'per_page'    => $fetch_all ? $total : $per_page,
             'posts'       => $items,
         ] );
 
@@ -426,6 +427,13 @@ class Post_Extractor_API {
      *   _embedded['wp:term'][n][] → categories / tags
      */
     private function format_post( WP_Post $post ): array {
+        $rest_data = $this->get_core_rest_post_data( $post );
+        if ( ! empty( $rest_data ) ) {
+            $blocks = new Post_Extractor_Blocks();
+            $rest_data['sections'] = $blocks->parse( $post->post_content );
+            return $rest_data;
+        }
+
         // Featured media ──────────────────────────────────────────────────────
         $thumbnail_id  = get_post_thumbnail_id( $post->ID );
         $featured_media_embed = [];
@@ -508,6 +516,40 @@ class Post_Extractor_API {
             // Plugin extras
             'sections' => $sections,
         ];
+    }
+
+    /**
+     * Build a single post payload using the core /wp/v2 controller shape so
+     * custom REST fields (register_rest_field) are included automatically.
+     */
+    private function get_core_rest_post_data( WP_Post $post ): array {
+        $post_type_obj = get_post_type_object( $post->post_type );
+        if ( ! $post_type_obj || ! $post_type_obj->show_in_rest ) {
+            return [];
+        }
+
+        $rest_base = $post_type_obj->rest_base ?: $post->post_type;
+        $path      = sprintf( '/wp/v2/%s/%d', $rest_base, (int) $post->ID );
+        $request   = new WP_REST_Request( 'GET', $path );
+        $request->set_param( '_embed', 1 );
+        $request->set_param( 'context', 'view' );
+
+        $response = rest_do_request( $request );
+        if ( is_wp_error( $response ) || ! ( $response instanceof WP_REST_Response ) ) {
+            return [];
+        }
+
+        if ( $response->get_status() < 200 || $response->get_status() >= 300 ) {
+            return [];
+        }
+
+        $server = rest_get_server();
+        if ( ! $server ) {
+            return [];
+        }
+
+        $data = $server->response_to_data( $response, true );
+        return is_array( $data ) ? $data : [];
     }
 
     /**
@@ -651,6 +693,7 @@ class Post_Extractor_API {
             'categories' => [ 'default' => null,       'sanitize_callback' => 'absint' ],
             'sticky'     => [ 'default' => null ],
             'tax'        => [ 'default' => null ],
+            'all'        => [ 'default' => false ],
             '_embed'     => [ 'default' => false ],
             'api_key'    => [ 'default' => '' ],
         ];

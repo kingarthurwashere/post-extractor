@@ -44,11 +44,28 @@ Mirrors `/wp/v2/posts` but works across **all post types** in one call.
 | `orderby` | hardcoded `date` | |
 | `order` | hardcoded `desc` | |
 | `post_type` | optional override | Filters to one type |
+| `all` | optional override | `true` returns all matching posts in one response |
 | `_embed` | always `true` | Param accepted; data always embedded |
 
 **Pagination:** Requests where `page` is greater than `total_pages` return **HTTP 200** with `"posts": []` and unchanged `X-WP-Total` / `X-WP-TotalPages` headers (same as `/wp/v2` collections). `per_page` is clamped to 1–100.
 
-Response fields match WP REST `?_embed=true` exactly:
+Response fields now come from the core WordPress REST item shape (`/wp/v2/{type}/{id}?_embed=1`) and include custom registered REST fields (for example `class_list`, `rttpg_*`) when the theme/plugins expose them.
+
+To mirror your native posts endpoint:
+
+```bash
+curl -H "X-PE-API-Key: <key>" \
+  "https://yoursite.com/wp-json/post-extractor/v1/posts?post_type=post&per_page=50&page=1"
+```
+
+Or fetch all posts in one call:
+
+```bash
+curl -H "X-PE-API-Key: <key>" \
+  "https://yoursite.com/wp-json/post-extractor/v1/posts?post_type=post&all=true"
+```
+
+Example response shape:
 
 ```json
 {
