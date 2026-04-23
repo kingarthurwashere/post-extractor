@@ -114,9 +114,9 @@ class Post_Extractor_Contributor_Moderation {
 	}
 
 	/**
-	 * @return true|WP_Error
+	 * @return bool|WP_Error
 	 */
-	public static function approve( int $app_post_id, string $source = 'rest' ): true|WP_Error {
+	public static function approve( int $app_post_id, string $source = 'rest' ): bool|WP_Error {
 		$app = get_post( $app_post_id );
 		if ( ! $app instanceof WP_Post || $app->post_type !== Post_Extractor_Contributor_App::POST_TYPE ) {
 			return new WP_Error( 'pe_not_found', __( 'Application not found.', 'post-extractor' ) );
@@ -157,9 +157,9 @@ class Post_Extractor_Contributor_Moderation {
 	}
 
 	/**
-	 * @return true|WP_Error
+	 * @return bool|WP_Error
 	 */
-	public static function reject( int $app_post_id, string $reason, string $source = 'rest' ): true|WP_Error {
+	public static function reject( int $app_post_id, string $reason, string $source = 'rest' ): bool|WP_Error {
 		$reason = trim( wp_strip_all_tags( (string) $reason, true ) );
 		if ( $reason === '' || strlen( $reason ) < 3 ) {
 			return new WP_Error( 'pe_reject_reason', __( 'Please provide a short reason (at least 3 characters) for the rejection.', 'post-extractor' ) );
@@ -246,3 +246,4 @@ class Post_Extractor_Contributor_Moderation {
 		wp_mail( $to, $subj, $body, [ 'Content-Type: text/plain; charset=UTF-8' ] );
 	}
 }
+

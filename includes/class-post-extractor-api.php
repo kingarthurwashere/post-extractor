@@ -1010,7 +1010,7 @@ class Post_Extractor_API {
     /**
      * Stricter per-IP cap for POST /submissions (in addition to check_permission’s window).
      */
-    private function enforce_submission_create_rate_limit(): true|WP_Error {
+    private function enforce_submission_create_rate_limit(): bool|WP_Error {
         $options = get_option( Post_Extractor_Settings::OPTION_KEY, [] );
         $per_hr  = isset( $options['submission_create_per_hour'] ) ? (int) $options['submission_create_per_hour'] : 30;
         if ( $per_hr <= 0 ) {
@@ -1345,7 +1345,7 @@ class Post_Extractor_API {
         return $name_map[ $norm ] ?? 'myAfrika';
     }
 
-    private function enforce_contributor_app_create_rate(): true|WP_Error {
+    private function enforce_contributor_app_create_rate(): bool|WP_Error {
         $ip  = isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( wp_unslash( (string) $_SERVER['REMOTE_ADDR'] ) ) : 'unknown';
         $key = 'pe_contrib_app_hr_' . md5( $ip );
         $data = get_transient( $key );
@@ -1578,7 +1578,7 @@ class Post_Extractor_API {
      * @param int    $app_id  Contributor application post id on this site.
      * @param string $pub_camel Expected Publication.name value (e.g. myKasi).
      */
-    private function verify_approved_contributor_application( int $app_id, string $pub_camel ): true|WP_Error {
+    private function verify_approved_contributor_application( int $app_id, string $pub_camel ): bool|WP_Error {
         if ( $app_id < 1 ) {
             return new WP_Error(
                 'pe_no_contributor_app',
@@ -1890,3 +1890,4 @@ class Post_Extractor_API {
         ];
     }
 }
+
