@@ -1,11 +1,11 @@
 <?php
 /**
- * Plugin Name: Post Extractor API
+ * Plugin Name: NewsBEPA Post Extractor for 263 Media
  * Plugin URI:  https://arthurnyasango.vercel.app/
  * Description: Extracts all post types with sections, custom fields, featured images, taxonomies, and Gutenberg blocks via REST API.
  * Version:     1.5.4
  * Author:      Kingarthurwashere
- * License:     GPL-2.0+
+ * License:     GPLv2 or later
  * Text Domain: post-extractor
  * Requires at least: 5.5
  * Requires PHP:      8.0
