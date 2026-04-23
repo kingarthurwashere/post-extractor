@@ -35,6 +35,33 @@
  * GET  /post-extractor/v1/site-identity
  *      Site name, home URL, theme custom logo, and WordPress “Site Icon” at
  *      several sizes (App clients use [mark_url] for hub / list icons).
+ *
+ * POST /post-extractor/v1/submissions
+ *      Citizen journalism pitch: JSON body (headline, summary, location, routed_desk,
+ *      publication). Creates a [pe_citizen] post in "pending" for wp-admin.
+ *
+ * GET  /post-extractor/v1/submissions/(?P<id>\\d+)
+ *      Status sync for the app: maps wp-admin workflow to pending/verified/rejected.
+ *
+ * GET  /post-extractor/v1/submissions?ids=1,2,3
+ *      Same JSON array as batch (max 50).
+ *
+ * POST /post-extractor/v1/contributor-applications
+ *      Apply to write: firstName, surname, email, phone, location, publication.
+ *      Creates [pe_contrib_app] pending; editors approve in wp-admin.
+ *
+ * GET  /post-extractor/v1/contributor-applications/(?P<id>\\d+)
+ *      Application status: pending|approved|rejected (for the app to poll).
+ *
+ * Story POST /submissions requires X-PE-Contributor-App-Id (or JSON contributorApplicationId)
+ * and an approved application on the same site for the same publication.
+ *
+ * POST /post-extractor/v1/editorial/login
+ *      NewsBEFA admin only: username + password (set in Settings → Post Extractor). Returns a session token.
+ *
+ * GET  /post-extractor/v1/editorial/contributor-applications
+ * GET  /post-extractor/v1/editorial/citizen-submissions
+ *      Require X-PE-Editorial-Token from login. Lists pending/approved items with site + publication context.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -162,6 +189,88 @@ class Post_Extractor_API {
             'methods'             => WP_REST_Server::READABLE,
             'callback'            => [ $this, 'get_site_identity' ],
             'permission_callback' => [ $this, 'check_permission' ],
+        ] );
+
+        register_rest_route( self::NAMESPACE, '/submissions/(?P<id>\d+)', [
+            'methods'             => WP_REST_Server::READABLE,
+            'callback'            => [ $this, 'get_citizen_submission' ],
+            'permission_callback' => [ $this, 'check_permission' ],
+            'args'                => [
+                'id' => [
+                    'required'          => true,
+                    'validate_callback' => fn( $v ) => is_numeric( $v ) && (int) $v > 0,
+                    'sanitize_callback' => 'absint',
+                ],
+            ],
+        ] );
+
+        register_rest_route( self::NAMESPACE, '/submissions', [
+            'methods'             => WP_REST_Server::CREATABLE,
+            'callback'            => [ $this, 'create_citizen_submission' ],
+            'permission_callback' => [ $this, 'check_permission' ],
+        ] );
+
+        register_rest_route( self::NAMESPACE, '/submissions', [
+            'methods'             => WP_REST_Server::READABLE,
+            'callback'            => [ $this, 'get_citizen_submissions_batch' ],
+            'permission_callback' => [ $this, 'check_permission' ],
+            'args'                => [
+                'ids' => [
+                    'required'          => true,
+                    'sanitize_callback' => 'sanitize_text_field',
+                ],
+            ],
+        ] );
+
+        register_rest_route( self::NAMESPACE, '/contributor-applications/(?P<id>\d+)', [
+            'methods'             => WP_REST_Server::READABLE,
+            'callback'            => [ $this, 'get_contributor_application' ],
+            'permission_callback' => [ $this, 'check_permission' ],
+            'args'                => [
+                'id' => [
+                    'required'          => true,
+                    'validate_callback' => fn( $v ) => is_numeric( $v ) && (int) $v > 0,
+                    'sanitize_callback' => 'absint',
+                ],
+            ],
+        ] );
+
+        register_rest_route( self::NAMESPACE, '/contributor-applications', [
+            'methods'             => WP_REST_Server::CREATABLE,
+            'callback'            => [ $this, 'create_contributor_application' ],
+            'permission_callback' => [ $this, 'check_permission' ],
+        ] );
+
+        register_rest_route( self::NAMESPACE, '/editorial/login', [
+            'methods'             => WP_REST_Server::CREATABLE,
+            'callback'            => [ $this, 'post_editorial_login' ],
+            'permission_callback' => '__return_true',
+        ] );
+
+        register_rest_route( self::NAMESPACE, '/editorial/logout', [
+            'methods'             => [ WP_REST_Server::CREATABLE, WP_REST_Server::READABLE ],
+            'callback'            => [ $this, 'post_editorial_logout' ],
+            'permission_callback' => [ $this, 'check_editorial' ],
+        ] );
+
+        register_rest_route( self::NAMESPACE, '/editorial/contributor-applications', [
+            'methods'             => WP_REST_Server::READABLE,
+            'callback'            => [ $this, 'get_editorial_contributor_list' ],
+            'permission_callback' => [ $this, 'check_editorial' ],
+            'args'                => [
+                'page'     => [ 'default' => 1,   'sanitize_callback' => 'absint' ],
+                'per_page' => [ 'default' => 30,  'sanitize_callback' => 'absint' ],
+            ],
+        ] );
+
+        register_rest_route( self::NAMESPACE, '/editorial/citizen-submissions', [
+            'methods'             => WP_REST_Server::READABLE,
+            'callback'            => [ $this, 'get_editorial_citizen_list' ],
+            'permission_callback' => [ $this, 'check_editorial' ],
+            'args'                => [
+                'page'     => [ 'default' => 1,  'sanitize_callback' => 'absint' ],
+                'per_page' => [ 'default' => 30, 'sanitize_callback' => 'absint' ],
+            ],
         ] );
     }
 
@@ -858,6 +967,833 @@ class Post_Extractor_API {
             ];
         }
         return $q;
+    }
+
+    // -------------------------------------------------------------------------
+    // Citizen submissions (Post Extractor app → wp-admin)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Stricter per-IP cap for POST /submissions (in addition to check_permission’s window).
+     */
+    private function enforce_submission_create_rate_limit(): true|WP_Error {
+        $options = get_option( Post_Extractor_Settings::OPTION_KEY, [] );
+        $per_hr  = isset( $options['submission_create_per_hour'] ) ? (int) $options['submission_create_per_hour'] : 30;
+        if ( $per_hr <= 0 ) {
+            return true;
+        }
+        $per_hr = min( $per_hr, 500 );
+
+        $ip  = isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( wp_unslash( (string) $_SERVER['REMOTE_ADDR'] ) ) : 'unknown';
+        $key = 'pe_cit_sub_hr_' . md5( $ip );
+
+        $data = get_transient( $key );
+        $now  = time();
+        if ( ! is_array( $data ) || ! isset( $data['start'], $data['count'] ) || ( $now - (int) $data['start'] ) >= 3600 ) {
+            $data = [ 'start' => $now, 'count' => 0 ];
+        }
+
+        ++$data['count'];
+        set_transient( $key, $data, 3600 );
+
+        if ( $data['count'] > $per_hr ) {
+            return new WP_Error(
+                'rest_too_many_requests',
+                __( 'Too many story submissions. Try again later.', 'post-extractor' ),
+                [ 'status' => 429 ]
+            );
+        }
+
+        return true;
+    }
+
+    private function default_submission_author_id(): int {
+        $admins = get_users(
+            [
+                'number'  => 1,
+                'role'    => 'administrator',
+                'fields'  => 'ID',
+                'orderby' => 'ID',
+                'order'   => 'ASC',
+            ]
+        );
+        if ( ! empty( $admins ) && isset( $admins[0] ) && (int) $admins[0] > 0 ) {
+            return (int) $admins[0];
+        }
+        $any = get_users( [ 'number' => 1, 'fields' => 'ID' ] );
+        if ( ! empty( $any ) && isset( $any[0] ) && (int) $any[0] > 0 ) {
+            return (int) $any[0];
+        }
+        return 1;
+    }
+
+    /**
+     * @return string One of: pendingReview, verified, rejected (matches Dart SubmissionStatus.name).
+     */
+    private function map_citizen_app_status( WP_Post $post ): string {
+        $raw = get_post_meta( $post->ID, Post_Extractor_Citizen::META_MODERATION, true );
+        if ( is_string( $raw ) && $raw !== '' ) {
+            $k = sanitize_key( $raw );
+            if ( in_array( $k, [ 'rejected', 'denied' ], true ) ) {
+                return 'rejected';
+            }
+            if ( in_array( $k, [ 'approved', 'verified' ], true ) ) {
+                return 'verified';
+            }
+            if ( in_array( $k, [ 'pending', 'pendingreview' ], true ) ) {
+                return 'pendingReview';
+            }
+        }
+        $st = $post->post_status;
+        if ( 'pending' === $st ) {
+            return 'pendingReview';
+        }
+        if ( in_array( $st, [ 'publish', 'private', 'future' ], true ) ) {
+            return 'verified';
+        }
+        if ( in_array( $st, [ 'trash' ], true ) ) {
+            return 'rejected';
+        }
+        if ( in_array( $st, [ 'draft' ], true ) ) {
+            return 'rejected';
+        }
+        // auto-draft, inherit, etc. — treat as pending until editor acts.
+        return 'pendingReview';
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function build_citizen_submission_array( WP_Post $post ): array|WP_Error {
+        if ( $post->post_type !== Post_Extractor_Citizen::POST_TYPE ) {
+            return new WP_Error( 'rest_not_found', __( 'Submission not found.', 'post-extractor' ), [ 'status' => 404 ] );
+        }
+
+        $headline  = (string) get_the_title( $post->ID );
+        $summary   = (string) $post->post_content;
+        $location  = (string) get_post_meta( $post->ID, '_pe_location', true );
+        $desk      = (string) get_post_meta( $post->ID, '_pe_routed_desk', true );
+        $pub       = (string) get_post_meta( $post->ID, '_pe_publication', true );
+        if ( $pub === '' ) {
+            $pub = 'myAfrika';
+        }
+        $created   = (string) get_post_time( 'c', true, $post );
+        if ( $created === '' ) {
+            $created = gmdate( 'c' );
+        }
+        $app_id_meta = (int) get_post_meta( $post->ID, Post_Extractor_Citizen::META_CONTRIBUTOR_APP_ID, true );
+        $src         = (string) get_post_meta( $post->ID, Post_Extractor_Citizen::META_SOURCE, true );
+
+        $out = [
+            'id'          => (int) $post->ID,
+            'headline'    => $headline,
+            'summary'     => $summary,
+            'location'    => $location,
+            'routedDesk'  => $desk !== '' ? $desk : 'General Desk',
+            'publication' => $pub,
+            'status'      => $this->map_citizen_app_status( $post ),
+            'createdAt'   => $created,
+            'source'      => $src !== '' ? $src : 'newsbepa',
+        ];
+        if ( $app_id_meta > 0 ) {
+            $out['contributorApplicationId'] = $app_id_meta;
+        }
+        return $out;
+    }
+
+    public function create_citizen_submission( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+        $lim = $this->enforce_submission_create_rate_limit();
+        if ( is_wp_error( $lim ) ) {
+            return $lim;
+        }
+
+        $body = $request->get_json_params();
+        if ( ! is_array( $body ) ) {
+            $body = [];
+        }
+
+        $headline = isset( $body['headline'] ) ? sanitize_text_field( (string) $body['headline'] ) : '';
+        if ( $headline === '' || strlen( $headline ) < 2 ) {
+            return new WP_Error(
+                'rest_invalid_param',
+                __( 'A headline is required.', 'post-extractor' ),
+                [ 'status' => 400 ]
+            );
+        }
+        if ( strlen( $headline ) > 200 ) {
+            $headline = (string) mb_substr( $headline, 0, 200 );
+        }
+
+        $summary = isset( $body['summary'] ) ? sanitize_textarea_field( (string) $body['summary'] ) : '';
+        if ( $summary === '' || strlen( $summary ) < 2 ) {
+            return new WP_Error(
+                'rest_invalid_param',
+                __( 'A story summary is required.', 'post-extractor' ),
+                [ 'status' => 400 ]
+            );
+        }
+        if ( strlen( $summary ) > 8000 ) {
+            $summary = (string) mb_substr( $summary, 0, 8000 );
+        }
+
+        $location = isset( $body['location'] ) ? sanitize_text_field( (string) $body['location'] ) : '';
+        if ( strlen( $location ) > 200 ) {
+            $location = (string) mb_substr( $location, 0, 200 );
+        }
+        if ( $location === '' ) {
+            return new WP_Error(
+                'rest_invalid_param',
+                __( 'Location is required.', 'post-extractor' ),
+                [ 'status' => 400 ]
+            );
+        }
+
+        $routed = isset( $body['routed_desk'] ) || isset( $body['routedDesk'] )
+            ? ( isset( $body['routedDesk'] ) ? (string) $body['routedDesk'] : (string) ( $body['routed_desk'] ?? '' ) )
+            : '';
+        $routed  = sanitize_text_field( $routed );
+        if ( strlen( $routed ) > 200 ) {
+            $routed = (string) mb_substr( $routed, 0, 200 );
+        }
+        if ( $routed === '' ) {
+            $routed = 'General Desk';
+        }
+
+        $raw_pub  = isset( $body['publication'] ) ? (string) $body['publication'] : 'myAfrika';
+        $norm     = strtolower( str_replace( [ ' ', "\t" ], '', $raw_pub ) );
+        $name_map = [
+            'myafrika'         => 'myAfrika',
+            'mykasi'           => 'myKasi',
+            'mychitown'        => 'myChitown',
+            'crossnetworktv'   => 'crossNetworkTV',
+            'crosstv'          => 'crossNetworkTV',
+        ];
+        $pub_camel = $name_map[ $norm ] ?? 'myAfrika';
+
+        $app_id = (int) $request->get_header( 'X-PE-Contributor-App-Id' );
+        if ( $app_id < 1 ) {
+            $h = (string) $request->get_header( 'x-pe-contributor-app-id' );
+            if ( is_numeric( $h ) ) {
+                $app_id = (int) $h;
+            }
+        }
+        if ( $app_id < 1 && isset( $body['contributorApplicationId'] ) && is_numeric( (string) $body['contributorApplicationId'] ) ) {
+            $app_id = (int) $body['contributorApplicationId'];
+        }
+        $app_check = $this->verify_approved_contributor_application( $app_id, $pub_camel );
+        if ( is_wp_error( $app_check ) ) {
+            return $app_check;
+        }
+
+        $post_id = wp_insert_post(
+            [
+                'post_type'    => Post_Extractor_Citizen::POST_TYPE,
+                'post_status'  => 'pending',
+                'post_title'   => $headline,
+                'post_content' => $summary,
+                'post_author'  => $this->default_submission_author_id(),
+            ],
+            true
+        );
+
+        if ( is_wp_error( $post_id ) ) {
+            return new WP_Error(
+                'rest_cant_create',
+                $post_id->get_error_message(),
+                [ 'status' => 500 ]
+            );
+        }
+
+        update_post_meta( (int) $post_id, '_pe_location', $location );
+        update_post_meta( (int) $post_id, '_pe_routed_desk', $routed );
+        update_post_meta( (int) $post_id, '_pe_publication', $pub_camel );
+        update_post_meta( (int) $post_id, Post_Extractor_Citizen::META_MODERATION, 'pending' );
+        update_post_meta( (int) $post_id, Post_Extractor_Citizen::META_SOURCE, 'newsbepa' );
+        if ( $app_id > 0 ) {
+            update_post_meta( (int) $post_id, Post_Extractor_Citizen::META_CONTRIBUTOR_APP_ID, $app_id );
+        }
+
+        $post = get_post( (int) $post_id );
+        if ( ! $post ) {
+            return new WP_Error( 'rest_cant_create', __( 'Could not load submission.', 'post-extractor' ), [ 'status' => 500 ] );
+        }
+
+        $data = $this->build_citizen_submission_array( $post );
+        if ( is_wp_error( $data ) ) {
+            return $data;
+        }
+        $response = rest_ensure_response( $data );
+        $response->set_status( 201 );
+        return $response;
+    }
+
+    public function get_citizen_submission( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+        $id   = (int) $request->get_param( 'id' );
+        $post = get_post( $id );
+        if ( ! $post || in_array( $post->post_status, [ 'auto-draft' ], true ) ) {
+            return new WP_Error( 'rest_not_found', __( 'Submission not found.', 'post-extractor' ), [ 'status' => 404 ] );
+        }
+        if ( (int) $post->ID !== $id ) {
+            return new WP_Error( 'rest_not_found', __( 'Submission not found.', 'post-extractor' ), [ 'status' => 404 ] );
+        }
+        $data = $this->build_citizen_submission_array( $post );
+        if ( is_wp_error( $data ) ) {
+            return $data;
+        }
+        return rest_ensure_response( $data );
+    }
+
+    public function get_citizen_submissions_batch( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+        $raw = (string) $request->get_param( 'ids' );
+        if ( $raw === '' ) {
+            return new WP_Error(
+                'rest_missing_param',
+                __( 'The ids query parameter is required (comma-separated post IDs).', 'post-extractor' ),
+                [ 'status' => 400 ]
+            );
+        }
+        $parts = array_map( 'trim', explode( ',', $raw ) );
+        $ids   = [];
+        foreach ( $parts as $p ) {
+            if ( $p === '' || ! is_numeric( $p ) ) {
+                continue;
+            }
+            $ids[] = (int) $p;
+        }
+        $ids = array_values( array_unique( array_filter( $ids, fn( $n ) => $n > 0 ) ) );
+        if ( empty( $ids ) ) {
+            return new WP_Error(
+                'rest_invalid_param',
+                __( 'No valid numeric ids were provided.', 'post-extractor' ),
+                [ 'status' => 400 ]
+            );
+        }
+        if ( count( $ids ) > 50 ) {
+            $ids = array_slice( $ids, 0, 50 );
+        }
+
+        $q = new WP_Query( [
+            'post_type'              => Post_Extractor_Citizen::POST_TYPE,
+            'post_status'            => 'any',
+            'post__in'               => $ids,
+            'orderby'                => 'post__in',
+            'posts_per_page'         => count( $ids ),
+            'no_found_rows'          => true,
+            'update_post_meta_cache' => true,
+        ] );
+
+        $list = [];
+        foreach ( $q->posts as $p ) {
+            if ( ! ( $p instanceof WP_Post ) ) {
+                continue;
+            }
+            $one = $this->build_citizen_submission_array( $p );
+            if ( ! is_wp_error( $one ) ) {
+                $list[] = $one;
+            }
+        }
+        return rest_ensure_response( [ 'submissions' => $list ] );
+    }
+
+    // -------------------------------------------------------------------------
+    // Contributor program applications
+    // -------------------------------------------------------------------------
+
+    private function map_publication_to_camel( string $raw ): string {
+        $norm = strtolower( str_replace( [ ' ', "\t" ], '', $raw ) );
+        $name_map = [
+            'myafrika'         => 'myAfrika',
+            'mykasi'           => 'myKasi',
+            'mychitown'        => 'myChitown',
+            'crossnetworktv'   => 'crossNetworkTV',
+            'crosstv'          => 'crossNetworkTV',
+        ];
+        return $name_map[ $norm ] ?? 'myAfrika';
+    }
+
+    private function enforce_contributor_app_create_rate(): true|WP_Error {
+        $ip  = isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( wp_unslash( (string) $_SERVER['REMOTE_ADDR'] ) ) : 'unknown';
+        $key = 'pe_contrib_app_hr_' . md5( $ip );
+        $data = get_transient( $key );
+        $now  = time();
+        if ( ! is_array( $data ) || ! isset( $data['start'], $data['count'] ) || ( $now - (int) $data['start'] ) >= 3600 ) {
+            $data = [ 'start' => $now, 'count' => 0 ];
+        }
+        ++$data['count'];
+        set_transient( $key, $data, 3600 );
+        if ( $data['count'] > 8 ) {
+            return new WP_Error(
+                'rest_too_many_requests',
+                __( 'Too many application attempts. Try again in an hour.', 'post-extractor' ),
+                [ 'status' => 429 ]
+            );
+        }
+        return true;
+    }
+
+    /**
+     * @return 'pending'|'approved'|'rejected'
+     */
+    private function map_contributor_application_status( WP_Post $post ): string {
+        if ( $post->post_type !== Post_Extractor_Contributor_App::POST_TYPE ) {
+            return 'rejected';
+        }
+        $raw = (string) get_post_meta( $post->ID, Post_Extractor_Contributor_App::META_MODERATION, true );
+        if ( in_array( $raw, [ 'rejected', 'denied' ], true ) ) {
+            return 'rejected';
+        }
+        if ( in_array( $raw, [ 'approved' ], true ) ) {
+            return 'approved';
+        }
+        if ( in_array( $raw, [ 'pending' ], true ) ) {
+            return 'pending';
+        }
+        $st = $post->post_status;
+        if ( 'pending' === $st ) {
+            return 'pending';
+        }
+        if ( in_array( $st, [ 'publish', 'private', 'future' ], true ) ) {
+            return 'approved';
+        }
+        if ( in_array( $st, [ 'trash' ], true ) ) {
+            return 'rejected';
+        }
+        if ( in_array( $st, [ 'draft' ], true ) ) {
+            return 'rejected';
+        }
+        return 'pending';
+    }
+
+    private function build_contributor_application_array( WP_Post $post ): array|WP_Error {
+        if ( $post->post_type !== Post_Extractor_Contributor_App::POST_TYPE ) {
+            return new WP_Error( 'rest_not_found', __( 'Application not found.', 'post-extractor' ), [ 'status' => 404 ] );
+        }
+        $first  = (string) get_post_meta( $post->ID, Post_Extractor_Contributor_App::META_FIRST, true );
+        $last   = (string) get_post_meta( $post->ID, Post_Extractor_Contributor_App::META_SURNAME, true );
+        $name   = (string) get_post_meta( $post->ID, Post_Extractor_Contributor_App::META_FULL_NAME, true );
+        if ( $name === '' && ( $first !== '' || $last !== '' ) ) {
+            $name = trim( $first . ' ' . $last );
+        }
+        $email = (string) get_post_meta( $post->ID, Post_Extractor_Contributor_App::META_EMAIL, true );
+        $phone = (string) get_post_meta( $post->ID, Post_Extractor_Contributor_App::META_PHONE, true );
+        $loc   = (string) get_post_meta( $post->ID, Post_Extractor_Contributor_App::META_LOCATION, true );
+        $pub   = (string) get_post_meta( $post->ID, Post_Extractor_Contributor_App::META_PUBLICATION, true );
+        if ( $pub === '' ) {
+            $pub = 'myAfrika';
+        }
+        $pjson = (string) get_post_meta( $post->ID, Post_Extractor_Contributor_App::META_PUBS_JSON, true );
+        $pubs  = [];
+        if ( $pjson !== '' ) {
+            $dec = json_decode( $pjson, true );
+            if ( is_array( $dec ) ) {
+                $pubs = array_map( 'strval', $dec );
+            }
+        }
+        $all_s = (int) get_post_meta( $post->ID, Post_Extractor_Contributor_App::META_ALL_SITES, true ) === 1;
+        if ( $pubs === [] && $pjson === '' && $name !== '' ) {
+            $pubs = [ $pub ];
+        }
+        $reason = (string) wp_strip_all_tags( (string) $post->post_content, true );
+        $created = (string) get_post_time( 'c', true, $post );
+        if ( $created === '' ) {
+            $created = gmdate( 'c' );
+        }
+        $status  = $this->map_contributor_application_status( $post );
+        $src     = (string) get_post_meta( $post->ID, Post_Extractor_Contributor_App::META_SOURCE, true );
+        $list    = [
+            'id'               => (int) $post->ID,
+            'name'             => $name,
+            'firstName'        => $first,
+            'surname'          => $last,
+            'email'            => $email,
+            'phone'            => $phone,
+            'location'         => $loc,
+            'reason'           => $reason,
+            'publication'      => $pub,
+            'publications'     => $pubs,
+            'allPublications'  => $all_s,
+            'status'           => $status,
+            'submittedAt'      => $created,
+            'source'           => $src !== '' ? $src : 'newsbepa',
+        ];
+        return $list;
+    }
+
+    public function create_contributor_application( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+        $lim = $this->enforce_contributor_app_create_rate();
+        if ( is_wp_error( $lim ) ) {
+            return $lim;
+        }
+        $body = $request->get_json_params();
+        if ( ! is_array( $body ) ) {
+            $body = [];
+        }
+        $name_one = isset( $body['name'] ) ? sanitize_text_field( (string) $body['name'] ) : '';
+        $first    = isset( $body['firstName'] ) ? sanitize_text_field( (string) $body['firstName'] ) : '';
+        $surname  = isset( $body['surname'] ) ? sanitize_text_field( (string) $body['surname'] ) : '';
+        if ( $name_one === '' && ( $first !== '' || $surname !== '' ) ) {
+            $name_one = trim( $first . ' ' . $surname );
+        }
+        if ( $name_one === '' || strlen( $name_one ) < 2 ) {
+            return new WP_Error( 'rest_invalid_param', __( 'Your name is required.', 'post-extractor' ), [ 'status' => 400 ] );
+        }
+        if ( strlen( $name_one ) > 200 ) {
+            $name_one = (string) mb_substr( $name_one, 0, 200 );
+        }
+        if ( $first === '' && $surname === '' ) {
+            $name_parts = preg_split( '/\s+/', $name_one, 2, PREG_SPLIT_NO_EMPTY );
+            $first  = (string) ( $name_parts[0] ?? '' );
+            $surname = (string) ( $name_parts[1] ?? '' );
+        }
+        $email = isset( $body['email'] ) ? sanitize_email( (string) $body['email'] ) : '';
+        if ( $email === '' || ! is_email( $email ) ) {
+            return new WP_Error( 'rest_invalid_param', __( 'A valid email address is required.', 'post-extractor' ), [ 'status' => 400 ] );
+        }
+        $phone = isset( $body['phone'] ) ? preg_replace( '/[^0-9+()\-\s.]/', '', (string) $body['phone'] ) : '';
+        if ( $phone === '' || strlen( $phone ) < 5 ) {
+            return new WP_Error( 'rest_invalid_param', __( 'A valid phone number is required.', 'post-extractor' ), [ 'status' => 400 ] );
+        }
+        if ( strlen( $phone ) > 50 ) {
+            $phone = (string) mb_substr( $phone, 0, 50 );
+        }
+        $location = isset( $body['location'] ) ? sanitize_text_field( (string) $body['location'] ) : '';
+        if ( $location === '' || strlen( $location ) < 2 ) {
+            return new WP_Error( 'rest_invalid_param', __( 'Location is required.', 'post-extractor' ), [ 'status' => 400 ] );
+        }
+        if ( strlen( $location ) > 200 ) {
+            $location = (string) mb_substr( $location, 0, 200 );
+        }
+        $raw_reason = isset( $body['reason'] ) ? (string) $body['reason'] : ( isset( $body['whyJoin'] ) ? (string) $body['whyJoin'] : '' );
+        if ( is_string( $raw_reason ) ) {
+            $raw_reason = wp_strip_all_tags( $raw_reason, true );
+        } else {
+            $raw_reason = '';
+        }
+        if ( $raw_reason === '' || strlen( $raw_reason ) < 20 ) {
+            return new WP_Error( 'rest_invalid_param', __( 'Please explain why you want to join (at least 20 characters).', 'post-extractor' ), [ 'status' => 400 ] );
+        }
+        if ( strlen( $raw_reason ) > 5000 ) {
+            $raw_reason = (string) mb_substr( $raw_reason, 0, 5000 );
+        }
+        $all_sites = filter_var( $body['allPublications'] ?? false, FILTER_VALIDATE_BOOLEAN );
+        $pubs_list = $body['publications'] ?? $body['publicationSlugs'] ?? null;
+        $out_pubs  = [];
+        if ( is_array( $pubs_list ) ) {
+            foreach ( $pubs_list as $one ) {
+                if ( is_string( $one ) && $one !== '' ) {
+                    $out_pubs[] = $this->map_publication_to_camel( (string) $one );
+                }
+            }
+        }
+        if ( $all_sites && $out_pubs === [] ) {
+            $out_pubs = [ 'myAfrika', 'myKasi', 'myChitown', 'crossNetworkTV' ];
+        }
+        $out_pubs = array_values( array_unique( $out_pubs ) );
+        if ( $out_pubs === [] ) {
+            return new WP_Error( 'rest_invalid_param', __( 'Select at least one publication, or all.', 'post-extractor' ), [ 'status' => 400 ] );
+        }
+        $raw_pub  = isset( $body['publication'] ) ? (string) $body['publication'] : ( $out_pubs[0] ?? 'myAfrika' );
+        $pub_camel = $this->map_publication_to_camel( $raw_pub );
+        if ( ! in_array( $pub_camel, $out_pubs, true ) ) {
+            return new WP_Error( 'rest_invalid_param', __( 'The application endpoint must be one of the selected publications.', 'post-extractor' ), [ 'status' => 400 ] );
+        }
+
+        $pjson = wp_json_encode( $out_pubs, JSON_UNESCAPED_SLASHES );
+        if ( $pjson === false ) {
+            $pjson = '[]';
+        }
+
+        $title = trim( $name_one . ' — ' . $email );
+        if ( strlen( $title ) > 200 ) {
+            $title = (string) mb_substr( $title, 0, 197 ) . '…';
+        }
+        $post_id = wp_insert_post(
+            [
+                'post_type'   => Post_Extractor_Contributor_App::POST_TYPE,
+                'post_status' => 'pending',
+                'post_title'  => $title,
+                'post_content'=> $raw_reason,
+                'post_author' => $this->default_submission_author_id(),
+            ],
+            true
+        );
+        if ( is_wp_error( $post_id ) ) {
+            return new WP_Error( 'rest_cant_create', $post_id->get_error_message(), [ 'status' => 500 ] );
+        }
+        $id = (int) $post_id;
+        update_post_meta( $id, Post_Extractor_Contributor_App::META_FULL_NAME, $name_one );
+        update_post_meta( $id, Post_Extractor_Contributor_App::META_FIRST, $first );
+        update_post_meta( $id, Post_Extractor_Contributor_App::META_SURNAME, $surname );
+        update_post_meta( $id, Post_Extractor_Contributor_App::META_EMAIL, $email );
+        update_post_meta( $id, Post_Extractor_Contributor_App::META_PHONE, $phone );
+        update_post_meta( $id, Post_Extractor_Contributor_App::META_LOCATION, $location );
+        update_post_meta( $id, Post_Extractor_Contributor_App::META_PUBLICATION, $pub_camel );
+        update_post_meta( $id, Post_Extractor_Contributor_App::META_PUBS_JSON, $pjson );
+        update_post_meta( $id, Post_Extractor_Contributor_App::META_ALL_SITES, $all_sites ? 1 : 0 );
+        update_post_meta( $id, Post_Extractor_Contributor_App::META_MODERATION, 'pending' );
+        update_post_meta( $id, Post_Extractor_Contributor_App::META_SOURCE, 'newsbepa' );
+
+        $post = get_post( $id );
+        if ( ! $post ) {
+            return new WP_Error( 'rest_cant_create', __( 'Could not load application.', 'post-extractor' ), [ 'status' => 500 ] );
+        }
+        $data = $this->build_contributor_application_array( $post );
+        if ( is_wp_error( $data ) ) {
+            return $data;
+        }
+        $res = rest_ensure_response( $data );
+        $res->set_status( 201 );
+        return $res;
+    }
+
+    public function get_contributor_application( WP_REST_Request $req ): WP_REST_Response|WP_Error {
+        $id   = (int) $req->get_param( 'id' );
+        $post = get_post( $id );
+        if ( ! $post || in_array( $post->post_status, [ 'auto-draft' ], true ) ) {
+            return new WP_Error( 'rest_not_found', __( 'Application not found.', 'post-extractor' ), [ 'status' => 404 ] );
+        }
+        if ( (int) $post->ID !== $id ) {
+            return new WP_Error( 'rest_not_found', __( 'Application not found.', 'post-extractor' ), [ 'status' => 404 ] );
+        }
+        $data = $this->build_contributor_application_array( $post );
+        if ( is_wp_error( $data ) ) {
+            return $data;
+        }
+        return rest_ensure_response( $data );
+    }
+
+    /**
+     * @param int    $app_id  Contributor application post id on this site.
+     * @param string $pub_camel Expected Publication.name value (e.g. myKasi).
+     */
+    private function verify_approved_contributor_application( int $app_id, string $pub_camel ): true|WP_Error {
+        if ( $app_id < 1 ) {
+            return new WP_Error(
+                'pe_no_contributor_app',
+                __( 'A contributor program application is required. Apply in the app, then wait for editor approval before submitting a story.', 'post-extractor' ),
+                [ 'status' => 403 ]
+            );
+        }
+        $p = get_post( $app_id );
+        if ( ! $p || $p->post_type !== Post_Extractor_Contributor_App::POST_TYPE ) {
+            return new WP_Error( 'pe_invalid_contributor_app', __( 'Contributor account not found on this site.', 'post-extractor' ), [ 'status' => 403 ] );
+        }
+        if ( in_array( $p->post_status, [ 'trash' ], true ) ) {
+            return new WP_Error( 'pe_contributor_app_inactive', __( 'This contributor application is not active.', 'post-extractor' ), [ 'status' => 403 ] );
+        }
+        if ( 'approved' !== $this->map_contributor_application_status( $p ) ) {
+            return new WP_Error(
+                'pe_contributor_not_approved',
+                __( 'Your account is not approved to submit stories on this site yet, or the application was rejected. Wait for the editorial team, or re-apply in the app.', 'post-extractor' ),
+                [ 'status' => 403 ]
+            );
+        }
+        $app_pub = (string) get_post_meta( $p->ID, Post_Extractor_Contributor_App::META_PUBLICATION, true );
+        if ( $app_pub === '' ) {
+            $app_pub = 'myAfrika';
+        }
+        if ( $app_pub !== $pub_camel ) {
+            return new WP_Error( 'pe_app_site_mismatch', __( 'The story’s target must match the site you applied to join.', 'post-extractor' ), [ 'status' => 403 ] );
+        }
+        return true;
+    }
+
+    // -------------------------------------------------------------------------
+    // NewsBEFA editorial preview (plugin-stored login; not WordPress user accounts)
+    // -------------------------------------------------------------------------
+
+    private const EDITORIAL_TOKEN_TTL = 28800; // 8 hours in seconds
+
+    private function get_editorial_token_from_request( WP_REST_Request $request ): string {
+        $h = (string) $request->get_header( 'X-PE-Editorial-Token' );
+        if ( $h === '' ) {
+            $h = (string) $request->get_header( 'x-pe-editorial-token' );
+        }
+        if ( $h === '' && $request->get_param( 'token' ) ) {
+            $h = (string) $request->get_param( 'token' );
+        }
+        $h = trim( $h );
+        if ( strlen( $h ) > 128 ) {
+            $h = (string) mb_substr( $h, 0, 128 );
+        }
+        return $h;
+    }
+
+    private function editorial_transient_key( string $token ): string {
+        return 'pe_nbedt_' . hash( 'sha256', $token );
+    }
+
+    private function editorial_client_ip(): string {
+        if ( function_exists( 'rest_get_client_ip' ) ) {
+            $ip = (string) rest_get_client_ip();
+            if ( $ip !== '' ) {
+                return $ip;
+            }
+        }
+        return (string) ( $_SERVER['REMOTE_ADDR'] ?? '0' );
+    }
+
+    public function check_editorial( WP_REST_Request $request ): bool|WP_Error {
+        $t = $this->get_editorial_token_from_request( $request );
+        if ( $t === '' || strlen( $t ) < 32 ) {
+            return new WP_Error( 'pe_editorial_auth', __( 'Editorial session required.', 'post-extractor' ), [ 'status' => 401 ] );
+        }
+        if ( get_transient( $this->editorial_transient_key( $t ) ) !== '1' ) {
+            return new WP_Error( 'pe_editorial_auth', __( 'Invalid or expired session.', 'post-extractor' ), [ 'status' => 401 ] );
+        }
+        return true;
+    }
+
+    public function post_editorial_login( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+        $ip     = $this->editorial_client_ip();
+        $rkey   = 'pe_edul_' . md5( $ip );
+        $n      = (int) get_transient( $rkey );
+        if ( $n > 20 ) {
+            return new WP_Error(
+                'rest_too_many_requests',
+                __( 'Too many login attempts. Try again later.', 'post-extractor' ),
+                [ 'status' => 429 ]
+            );
+        }
+        set_transient( $rkey, $n + 1, 15 * MINUTE_IN_SECONDS );
+
+        $body = $request->get_json_params();
+        if ( ! is_array( $body ) ) {
+            $body = [];
+        }
+        $u = isset( $body['username'] ) ? sanitize_user( (string) $body['username'], true ) : '';
+        $p = isset( $body['password'] ) ? (string) $body['password'] : '';
+        if ( $u === '' || $p === '' ) {
+            return new WP_Error( 'pe_editorial_invalid', __( 'Username and password are required.', 'post-extractor' ), [ 'status' => 400 ] );
+        }
+        $opt   = get_option( Post_Extractor_Settings::OPTION_KEY, [] );
+        $ok_u  = (string) ( $opt['newsbepa_editorial_user'] ?? '' );
+        $hash  = (string) ( $opt['newsbepa_editorial_hash'] ?? '' );
+        if ( $ok_u === '' || $hash === '' ) {
+            return new WP_Error(
+                'pe_editorial_unconfigured',
+                __( 'Editorial login is not configured for this site.', 'post-extractor' ),
+                [ 'status' => 503 ]
+            );
+        }
+        if ( $ok_u !== $u || ! wp_check_password( $p, $hash ) ) {
+            return new WP_Error( 'pe_editorial_invalid', __( 'Invalid credentials.', 'post-extractor' ), [ 'status' => 401 ] );
+        }
+        $token = bin2hex( random_bytes( 32 ) );
+        $ttl = (int) apply_filters( 'post_extractor_editorial_token_ttl', self::EDITORIAL_TOKEN_TTL );
+        if ( $ttl < 300 ) {
+            $ttl = 300;
+        }
+        if ( $ttl > 7 * DAY_IN_SECONDS ) {
+            $ttl = 7 * DAY_IN_SECONDS;
+        }
+        set_transient( $this->editorial_transient_key( $token ), '1', $ttl );
+        // Successful login: reset per-IP counter.
+        delete_transient( $rkey );
+        $payload = [
+            'token'     => $token,
+            'expiresIn' => $ttl,
+            'siteName'  => (string) get_bloginfo( 'name', 'raw' ),
+            'siteUrl'   => (string) home_url( '/' ),
+        ];
+        return rest_ensure_response( $payload );
+    }
+
+    public function post_editorial_logout( WP_REST_Request $request ): WP_REST_Response {
+        $t = $this->get_editorial_token_from_request( $request );
+        if ( $t !== '' ) {
+            delete_transient( $this->editorial_transient_key( $t ) );
+        }
+        return rest_ensure_response( [ 'ok' => true ] );
+    }
+
+    /**
+     * @return array{items: array<int, array<string, mixed>>, total: int, page: int, perPage: int, totalPages: int, siteName: string, siteUrl: string}
+     */
+    private function run_editorial_paginated_cpt( string $post_type, callable $row_builder, int $page, int $per_page ): array {
+        if ( $page < 1 ) {
+            $page = 1;
+        }
+        if ( $per_page < 1 ) {
+            $per_page = 30;
+        }
+        if ( $per_page > 100 ) {
+            $per_page = 100;
+        }
+        $q = new WP_Query(
+            [
+                'post_type'              => $post_type,
+                'post_status'            => 'any',
+                'posts_per_page'         => $per_page,
+                'paged'                  => $page,
+                'orderby'                => 'date',
+                'order'                  => 'DESC',
+                'no_found_rows'          => false,
+                'update_post_meta_cache' => true,
+                'update_post_term_cache' => false,
+            ]
+        );
+        $items = [];
+        foreach ( $q->posts as $post ) {
+            if ( ! ( $post instanceof WP_Post ) || $post->post_type !== $post_type ) {
+                continue;
+            }
+            if ( in_array( $post->post_status, [ 'auto-draft' ], true ) ) {
+                continue;
+            }
+            if ( in_array( $post->post_status, [ 'trash' ], true ) ) {
+                continue;
+            }
+            $one = $row_builder( $post );
+            if ( is_wp_error( $one ) ) {
+                continue;
+            }
+            if ( is_array( $one ) ) {
+                $one['wpEditUrl'] = (string) admin_url( 'post.php?post=' . (int) $post->ID . '&action=edit' );
+            }
+            $items[]         = $one;
+        }
+        $total   = (int) $q->found_posts;
+        $pages   = (int) max( 1, (int) ceil( $total / $per_page ) );
+        $site    = (string) get_bloginfo( 'name', 'raw' );
+        $home    = (string) home_url( '/' );
+        return [
+            'items'      => $items,
+            'total'      => $total,
+            'page'       => $page,
+            'perPage'    => $per_page,
+            'totalPages' => $pages,
+            'siteName'   => $site,
+            'siteUrl'    => $home,
+        ];
+    }
+
+    public function get_editorial_contributor_list( WP_REST_Request $req ): WP_REST_Response {
+        $page     = (int) $req->get_param( 'page' );
+        $per_page = (int) $req->get_param( 'per_page' );
+        $out      = $this->run_editorial_paginated_cpt(
+            Post_Extractor_Contributor_App::POST_TYPE,
+            function ( WP_Post $post ) {
+                return $this->build_contributor_application_array( $post );
+            },
+            $page,
+            $per_page
+        );
+        return rest_ensure_response( $out );
+    }
+
+    public function get_editorial_citizen_list( WP_REST_Request $req ): WP_REST_Response {
+        $page     = (int) $req->get_param( 'page' );
+        $per_page = (int) $req->get_param( 'per_page' );
+        $out      = $this->run_editorial_paginated_cpt(
+            Post_Extractor_Citizen::POST_TYPE,
+            function ( WP_Post $post ) {
+                return $this->build_citizen_submission_array( $post );
+            },
+            $page,
+            $per_page
+        );
+        return rest_ensure_response( $out );
     }
 
     private function posts_args(): array {

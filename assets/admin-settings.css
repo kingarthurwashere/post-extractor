@@ -1,0 +1,305 @@
+/**
+ * Post Extractor — settings screen (v1.5+).
+ * Scoped to .pe-admin; works with default wp-admin and dark toolbar.
+ */
+.pe-admin {
+	--pe-bg: #f0f0f1;
+	--pe-surface: #fff;
+	--pe-border: #c3c4c7;
+	--pe-text: #1d2327;
+	--pe-muted: #646970;
+	--pe-accent: #135e96;
+	--pe-accent-hover: #0a4b78;
+	--pe-ok: #00a32a;
+	--pe-warn: #dba617;
+	--pe-cit: #1d3f5c;
+	--pe-post: #5c3d1d;
+	--pe-radius: 6px;
+	--pe-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+	max-width: 1200px;
+}
+
+.pe-admin__head {
+	margin-bottom: 0.5rem;
+}
+
+.pe-admin__sub {
+	color: var(--pe-muted);
+	font-size: 14px;
+	margin: 0.25rem 0 0;
+}
+
+.pe-admin__ver {
+	display: inline-block;
+	margin-top: 0.35rem;
+	padding: 0.2rem 0.55rem;
+	background: #e2e2e2;
+	color: #2c3338;
+	border-radius: 4px;
+	font-size: 12px;
+	font-weight: 600;
+}
+
+/* Tabs (WordPress nav-tab + custom) */
+.pe-admin__tablist {
+	border-bottom: 1px solid var(--pe-border);
+	margin: 1.25rem 0 0;
+	padding: 0 0.25rem 0 0;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.1rem 0.25rem;
+}
+
+.pe-admin__tab {
+	position: relative;
+}
+
+.pe-admin__tab .nav-tab {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.4rem;
+	margin: 0 0 -1px 0;
+	padding: 0.5rem 0.85rem;
+	font-size: 13px;
+}
+
+.pe-admin__tab .nav-tab .dashicons {
+	font-size: 16px;
+	width: 16px;
+	height: 16px;
+	line-height: 1.2;
+	opacity: 0.85;
+}
+
+/* Panels */
+.pe-panel {
+	margin-top: 0;
+}
+
+.pe-panel[hidden] {
+	display: none !important;
+}
+
+.pe-panel__inner {
+	background: var(--pe-surface);
+	border: 1px solid var(--pe-border);
+	border-radius: var(--pe-radius);
+	padding: 1.25rem 1.5rem 1.5rem;
+	margin-top: 0.5rem;
+	box-shadow: var(--pe-shadow);
+}
+
+/* Hero stats */
+.pe-stats {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+	gap: 0.9rem;
+	margin: 0 0 1.25rem;
+}
+
+.pe-stat {
+	background: var(--pe-surface);
+	border: 1px solid var(--pe-border);
+	border-radius: var(--pe-radius);
+	padding: 1rem 1.1rem;
+	box-shadow: var(--pe-shadow);
+	display: flex;
+	flex-direction: column;
+	gap: 0.2rem;
+}
+
+.pe-stat__label {
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.03em;
+	text-transform: uppercase;
+	color: var(--pe-muted);
+}
+
+.pe-stat__val {
+	font-size: 1.6rem;
+	font-weight: 700;
+	line-height: 1.1;
+}
+
+.pe-stat--posts {
+	border-top: 3px solid #c96;
+}
+
+.pe-stat--submit {
+	border-top: 3px solid #1d3f5c;
+}
+
+.pe-stat--app {
+	border-top: 3px solid #2e7d32;
+}
+
+/* Section titles inside cards */
+.pe-section-title {
+	margin: 0 0 0.75rem;
+	font-size: 1.1rem;
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+}
+
+.pe-section-title .dashicons {
+	color: var(--pe-accent);
+}
+
+/* Badges (GET / POST) */
+.pe-badge {
+	font-size: 10px;
+	font-weight: 700;
+	padding: 0.1rem 0.35rem;
+	border-radius: 3px;
+	vertical-align: middle;
+	letter-spacing: 0.02em;
+}
+
+.pe-badge--get {
+	background: #e4f0f8;
+	color: #0a3d62;
+}
+
+.pe-badge--post {
+	background: #f0e6f2;
+	color: #5a1d5a;
+}
+
+/* Grouped table */
+.pe-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 13px;
+}
+
+.pe-table th,
+.pe-table td {
+	text-align: left;
+	padding: 0.5rem 0.65rem;
+	border-bottom: 1px solid #dcdcde;
+	vertical-align: top;
+}
+
+.pe-table th {
+	background: #f6f7f7;
+	font-weight: 600;
+	white-space: nowrap;
+}
+
+.pe-table code,
+.pe-table .code {
+	word-break: break-all;
+}
+
+.pe-table tr:last-child th,
+.pe-table tr:last-child td {
+	border-bottom: none;
+}
+
+.pe-note {
+	color: var(--pe-muted);
+	font-size: 13px;
+	margin: 0.5rem 0 0;
+}
+
+/* Split grid for settings form */
+.pe-form-grid {
+	display: grid;
+	gap: 0;
+}
+
+@media (min-width: 960px) {
+	.pe-form-row-split {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 0 1.5rem;
+	}
+}
+
+/* Callout */
+.pe-callout {
+	background: #f0f6fc;
+	border: 1px solid #9ec2e6;
+	border-left: 4px solid var(--pe-accent);
+	border-radius: var(--pe-radius);
+	padding: 0.85rem 1rem;
+	margin: 0 0 1rem;
+	font-size: 13px;
+}
+
+.pe-callout--citizen {
+	background: #f0f4f6;
+	border-color: #9eb0bd;
+}
+
+/* Accordion (reference) */
+.pe-details {
+	border: 1px solid var(--pe-border);
+	border-radius: var(--pe-radius);
+	margin-bottom: 0.6rem;
+	background: var(--pe-surface);
+}
+
+.pe-details > summary {
+	cursor: pointer;
+	font-weight: 600;
+	padding: 0.65rem 0.9rem;
+	list-style: none;
+}
+
+.pe-details > summary::-webkit-details-marker {
+	display: none;
+}
+
+.pe-details > summary::after {
+	content: " ▶";
+	font-size: 0.7em;
+	opacity: 0.5;
+}
+
+.pe-details[open] > summary::after {
+	content: " ▼";
+}
+
+.pe-details__body {
+	padding: 0 0.5rem 0.75rem;
+}
+
+/* Sticky bar for main save (optional) */
+.pe-admin .submit {
+	margin-top: 0.5rem;
+	padding: 0.5rem 0 0;
+}
+
+/* Curl block */
+.pe-code-block {
+	background: #1d2327;
+	color: #f0f0f1;
+	padding: 1rem 1.1rem;
+	border-radius: var(--pe-radius);
+	overflow: auto;
+	font-size: 12.5px;
+	line-height: 1.5;
+}
+
+.pe-code-block code {
+	color: #c7e0ff;
+	background: transparent;
+	font-family: Consolas, Monaco, monospace;
+}
+
+/* Links row */
+.pe-quicklinks {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+	margin: 0.75rem 0 0;
+}
+
+.pe-quicklinks a.button {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.25rem;
+}
