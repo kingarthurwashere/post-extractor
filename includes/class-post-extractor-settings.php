@@ -90,6 +90,10 @@ class Post_Extractor_Settings {
 			$clean['premium_verify_timeout'] = max( 2, min( 30, absint( $input['premium_verify_timeout'] ) ) );
 		}
 		$clean['premium_verify_strict'] = ! empty( $input['premium_verify_strict'] ) ? 1 : 0;
+		$clean['cancel_undo_window_seconds'] = 600;
+		if ( isset( $input['cancel_undo_window_seconds'] ) && $input['cancel_undo_window_seconds'] !== '' ) {
+			$clean['cancel_undo_window_seconds'] = max( 60, min( 86400, absint( $input['cancel_undo_window_seconds'] ) ) );
+		}
 
 		return $clean;
 	}
@@ -160,6 +164,7 @@ class Post_Extractor_Settings {
 		$premium_verify_bearer = (string) ( $options['premium_verify_bearer'] ?? '' );
 		$premium_verify_timeout = isset( $options['premium_verify_timeout'] ) ? (int) $options['premium_verify_timeout'] : 8;
 		$premium_verify_strict = isset( $options['premium_verify_strict'] ) && (int) $options['premium_verify_strict'] === 1;
+		$cancel_undo_window_seconds = isset( $options['cancel_undo_window_seconds'] ) ? max( 60, min( 86400, (int) $options['cancel_undo_window_seconds'] ) ) : 600;
 		$wp_core_groups = $this->discover_wp_core_endpoint_groups();
 
 		$pt_citizen = class_exists( 'Post_Extractor_Citizen' ) ? Post_Extractor_Citizen::POST_TYPE : 'pe_citizen';
@@ -390,6 +395,13 @@ class Post_Extractor_Settings {
 												<input type="checkbox" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[premium_verify_strict]" value="1" <?php checked( $premium_verify_strict ); ?> />
 												<?php esc_html_e( 'Fail closed when verifier is unavailable/invalid response.', 'post-extractor' ); ?>
 											</label>
+										</td>
+									</tr>
+									<tr>
+										<th scope="row"><label for="pe_cancel_undo_window_seconds"><?php esc_html_e( 'Cancel undo window (seconds)', 'post-extractor' ); ?></label></th>
+										<td>
+											<input type="number" id="pe_cancel_undo_window_seconds" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[cancel_undo_window_seconds]" value="<?php echo esc_attr( (string) $cancel_undo_window_seconds ); ?>" class="small-text" min="60" max="86400" step="1" />
+											<p class="description"><?php esc_html_e( 'How long a contributor can undo an in-app cancellation. Default: 600 (10 minutes).', 'post-extractor' ); ?></p>
 										</td>
 									</tr>
 								</table>

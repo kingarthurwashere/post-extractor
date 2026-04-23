@@ -21,6 +21,7 @@ define( 'POST_EXTRACTOR_DIR', plugin_dir_path( __FILE__ ) );
 define( 'POST_EXTRACTOR_URL', plugin_dir_url( __FILE__ ) );
 
 require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-citizen.php';
+require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-citizen-admin.php';
 require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-contributor-app.php';
 require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-contributor-moderation.php';
 require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-contributor-app-admin.php';

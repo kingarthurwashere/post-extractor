@@ -287,6 +287,29 @@ curl -H "X-PE-Editorial-Token: <token>" \
 
 ---
 
+### `POST /contributor-applications/{id}/cancel`
+Cancels a pending application from the app and marks it as rejected by applicant.
+
+Body (JSON):
+- `email` (required)
+- `reason` (optional)
+
+### `POST /contributor-applications/{id}/undo-cancel`
+Restores an app-cancelled application back to `pending` if still inside the configured undo window.
+
+Body (JSON):
+- `email` (required)
+
+Notes:
+- Undo availability is exposed in the application payload fields:
+  - `cancelledByApplicant`
+  - `cancelUndoUntil` (UTC ISO string)
+  - `canUndoCancel`
+- Undo window length is configurable in wp-admin:
+  - **Settings → Post Extractor → Cancel undo window (seconds)** (default `600`).
+
+---
+
 ### `GET /premium/entitlement`
 Returns premium status for a device.
 

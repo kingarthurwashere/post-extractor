@@ -71,6 +71,38 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Post_Extractor_API {
 
     const NAMESPACE = 'post-extractor/v1';
+    private const META_CITIZEN_REJECTION_REASON = '_pe_citizen_rejection_reason';
+    private const META_CITIZEN_CANCELLED_BY_CONTRIBUTOR = '_pe_citizen_cancelled_by_contributor';
+    private const META_CITIZEN_CANCELLED_AT = '_pe_citizen_cancelled_at';
+    private const META_CANCELLED_BY_APPLICANT = '_pe_cancelled_by_applicant';
+    private const META_CANCELLED_AT = '_pe_cancelled_at';
+    private const CANCEL_UNDO_WINDOW_SECONDS = 600;
+    /** @var array<string, mixed>|null */
+    private ?array $settings_cache = null;
+
+    /**
+     * Request-scope settings cache to avoid repeated get_option() hits.
+     *
+     * @return array<string, mixed>
+     */
+    private function get_settings(): array {
+        if ( $this->settings_cache !== null ) {
+            return $this->settings_cache;
+        }
+        if ( ! class_exists( 'Post_Extractor_Settings' ) ) {
+            $this->settings_cache = [];
+            return $this->settings_cache;
+        }
+        $opts = get_option( Post_Extractor_Settings::OPTION_KEY, [] );
+        $this->settings_cache = is_array( $opts ) ? $opts : [];
+        return $this->settings_cache;
+    }
+
+    private function contributor_cancel_undo_window_seconds(): int {
+        $opts = $this->get_settings();
+        $raw = isset( $opts['cancel_undo_window_seconds'] ) ? absint( $opts['cancel_undo_window_seconds'] ) : self::CANCEL_UNDO_WINDOW_SECONDS;
+        return max( 60, min( 86400, $raw ) );
+    }
 
     /**
      * Post types to omit from automatic extraction (core/system — not “news” content).
@@ -209,6 +241,30 @@ class Post_Extractor_API {
                 ],
             ],
         ] );
+        register_rest_route( self::NAMESPACE, '/submissions/(?P<id>\d+)/cancel', [
+            'methods'             => WP_REST_Server::CREATABLE,
+            'callback'            => [ $this, 'post_cancel_citizen_submission' ],
+            'permission_callback' => [ $this, 'check_permission' ],
+            'args'                => [
+                'id' => [
+                    'required'          => true,
+                    'validate_callback' => fn( $v ) => is_numeric( $v ) && (int) $v > 0,
+                    'sanitize_callback' => 'absint',
+                ],
+            ],
+        ] );
+        register_rest_route( self::NAMESPACE, '/submissions/(?P<id>\d+)/undo-cancel', [
+            'methods'             => WP_REST_Server::CREATABLE,
+            'callback'            => [ $this, 'post_undo_cancel_citizen_submission' ],
+            'permission_callback' => [ $this, 'check_permission' ],
+            'args'                => [
+                'id' => [
+                    'required'          => true,
+                    'validate_callback' => fn( $v ) => is_numeric( $v ) && (int) $v > 0,
+                    'sanitize_callback' => 'absint',
+                ],
+            ],
+        ] );
 
         register_rest_route( self::NAMESPACE, '/submissions', [
             'methods'             => WP_REST_Server::CREATABLE,
@@ -245,6 +301,31 @@ class Post_Extractor_API {
             'methods'             => WP_REST_Server::CREATABLE,
             'callback'            => [ $this, 'create_contributor_application' ],
             'permission_callback' => [ $this, 'check_permission' ],
+        ] );
+
+        register_rest_route( self::NAMESPACE, '/contributor-applications/(?P<id>\d+)/cancel', [
+            'methods'             => WP_REST_Server::CREATABLE,
+            'callback'            => [ $this, 'post_cancel_contributor_application' ],
+            'permission_callback' => [ $this, 'check_permission' ],
+            'args'                => [
+                'id' => [
+                    'required'          => true,
+                    'validate_callback' => fn( $v ) => is_numeric( $v ) && (int) $v > 0,
+                    'sanitize_callback' => 'absint',
+                ],
+            ],
+        ] );
+        register_rest_route( self::NAMESPACE, '/contributor-applications/(?P<id>\d+)/undo-cancel', [
+            'methods'             => WP_REST_Server::CREATABLE,
+            'callback'            => [ $this, 'post_undo_cancel_contributor_application' ],
+            'permission_callback' => [ $this, 'check_permission' ],
+            'args'                => [
+                'id' => [
+                    'required'          => true,
+                    'validate_callback' => fn( $v ) => is_numeric( $v ) && (int) $v > 0,
+                    'sanitize_callback' => 'absint',
+                ],
+            ],
         ] );
 
         register_rest_route( self::NAMESPACE, '/editorial/login', [
@@ -306,6 +387,30 @@ class Post_Extractor_API {
                 'per_page' => [ 'default' => 30, 'sanitize_callback' => 'absint' ],
                 'status'   => [ 'default' => 'all' ],
                 'q'        => [ 'default' => '', 'sanitize_callback' => 'sanitize_text_field' ],
+            ],
+        ] );
+        register_rest_route( self::NAMESPACE, '/editorial/citizen-submissions/(?P<id>\d+)/approve', [
+            'methods'             => WP_REST_Server::CREATABLE,
+            'callback'            => [ $this, 'post_editorial_citizen_approve' ],
+            'permission_callback' => [ $this, 'check_editorial' ],
+            'args'                => [
+                'id' => [
+                    'required'          => true,
+                    'validate_callback' => fn( $v ) => is_numeric( $v ) && (int) $v > 0,
+                    'sanitize_callback' => 'absint',
+                ],
+            ],
+        ] );
+        register_rest_route( self::NAMESPACE, '/editorial/citizen-submissions/(?P<id>\d+)/reject', [
+            'methods'             => WP_REST_Server::CREATABLE,
+            'callback'            => [ $this, 'post_editorial_citizen_reject' ],
+            'permission_callback' => [ $this, 'check_editorial' ],
+            'args'                => [
+                'id' => [
+                    'required'          => true,
+                    'validate_callback' => fn( $v ) => is_numeric( $v ) && (int) $v > 0,
+                    'sanitize_callback' => 'absint',
+                ],
             ],
         ] );
 
@@ -382,7 +487,7 @@ class Post_Extractor_API {
             return $rate;
         }
 
-        $options = get_option( Post_Extractor_Settings::OPTION_KEY, [] );
+        $options = $this->get_settings();
         $api_key = isset( $options['api_key'] ) ? (string) $options['api_key'] : '';
 
         if ( $api_key === '' ) {
@@ -414,7 +519,7 @@ class Post_Extractor_API {
      * Simple per-IP rate limit (transient window). Skipped for editors (handled above).
      */
     private function enforce_rate_limit(): bool|WP_Error {
-        $options = get_option( Post_Extractor_Settings::OPTION_KEY, [] );
+        $options = $this->get_settings();
         $limit   = isset( $options['rate_limit_per_minute'] ) ? (int) $options['rate_limit_per_minute'] : 120;
         if ( $limit <= 0 ) {
             return true;
@@ -690,7 +795,7 @@ class Post_Extractor_API {
     }
 
     public function get_health( WP_REST_Request $request ): WP_REST_Response {
-        $opts = get_option( Post_Extractor_Settings::OPTION_KEY, [] );
+        $opts = $this->get_settings();
         $api_key = isset( $opts['api_key'] ) ? (string) $opts['api_key'] : '';
         $editorial_user = isset( $opts['newsbepa_editorial_user'] ) ? (string) $opts['newsbepa_editorial_user'] : '';
         $editorial_hash = isset( $opts['newsbepa_editorial_hash'] ) ? (string) $opts['newsbepa_editorial_hash'] : '';
@@ -707,6 +812,7 @@ class Post_Extractor_API {
             'api_key_configured'    => $api_key !== '',
             'rate_limit_per_minute' => isset( $opts['rate_limit_per_minute'] ) ? (int) $opts['rate_limit_per_minute'] : 120,
             'editorial_configured'  => ( $editorial_user !== '' && $editorial_hash !== '' ),
+            'cancel_undo_window_seconds' => $this->contributor_cancel_undo_window_seconds(),
             'extractable_types'     => $post_types,
             'extractable_total'     => count( $post_types ),
         ] );
@@ -940,7 +1046,7 @@ class Post_Extractor_API {
         string $purchase_token,
         string $expires_at_hint
     ): array|WP_Error {
-        $opts = get_option( Post_Extractor_Settings::OPTION_KEY, [] );
+        $opts = $this->get_settings();
         $provider_url = isset( $opts['premium_verify_url'] ) ? trim( (string) $opts['premium_verify_url'] ) : '';
         $provider_bearer = isset( $opts['premium_verify_bearer'] ) ? (string) $opts['premium_verify_bearer'] : '';
         $provider_timeout = isset( $opts['premium_verify_timeout'] ) ? (int) $opts['premium_verify_timeout'] : 8;
@@ -1683,7 +1789,7 @@ class Post_Extractor_API {
     }
 
     private function build_meta(): Post_Extractor_Meta {
-        $opts = get_option( Post_Extractor_Settings::OPTION_KEY, [] );
+        $opts = $this->get_settings();
 
         return new Post_Extractor_Meta(
             $this->parse_allowlist_tokens( (string) ( $opts['meta_keys_allowlist'] ?? '' ) ),
@@ -1741,7 +1847,7 @@ class Post_Extractor_API {
      * Stricter per-IP cap for POST /submissions (in addition to check_permission’s window).
      */
     private function enforce_submission_create_rate_limit(): bool|WP_Error {
-        $options = get_option( Post_Extractor_Settings::OPTION_KEY, [] );
+        $options = $this->get_settings();
         $per_hr  = isset( $options['submission_create_per_hour'] ) ? (int) $options['submission_create_per_hour'] : 30;
         if ( $per_hr <= 0 ) {
             return true;
@@ -1847,6 +1953,21 @@ class Post_Extractor_API {
         }
         $app_id_meta = (int) get_post_meta( $post->ID, Post_Extractor_Citizen::META_CONTRIBUTOR_APP_ID, true );
         $src         = (string) get_post_meta( $post->ID, Post_Extractor_Citizen::META_SOURCE, true );
+        $rej         = (string) get_post_meta( $post->ID, self::META_CITIZEN_REJECTION_REASON, true );
+        $cancelled_by_contributor = (int) get_post_meta( $post->ID, self::META_CITIZEN_CANCELLED_BY_CONTRIBUTOR, true ) === 1;
+        $cancelled_at = (string) get_post_meta( $post->ID, self::META_CITIZEN_CANCELLED_AT, true );
+        $undo_window_seconds = $this->contributor_cancel_undo_window_seconds();
+        $status      = $this->map_citizen_app_status( $post );
+        $undo_until_iso = null;
+        $can_undo_cancel = false;
+        if ( $cancelled_by_contributor && $status === 'rejected' ) {
+            $ts = strtotime( $cancelled_at );
+            if ( is_int( $ts ) && $ts > 0 ) {
+                $undo_until = $ts + $undo_window_seconds;
+                $undo_until_iso = gmdate( 'c', $undo_until );
+                $can_undo_cancel = time() <= $undo_until;
+            }
+        }
 
         $out = [
             'id'          => (int) $post->ID,
@@ -1855,9 +1976,13 @@ class Post_Extractor_API {
             'location'    => $location,
             'routedDesk'  => $desk !== '' ? $desk : 'General Desk',
             'publication' => $pub,
-            'status'      => $this->map_citizen_app_status( $post ),
+            'status'      => $status,
             'createdAt'   => $created,
             'source'      => $src !== '' ? $src : 'newsbepa',
+            'rejectionReason' => ( $status === 'rejected' && $rej !== '' ) ? $rej : null,
+            'cancelledByContributor' => $cancelled_by_contributor,
+            'cancelUndoUntil' => $undo_until_iso,
+            'canUndoCancel' => $can_undo_cancel,
         ];
         if ( $app_id_meta > 0 ) {
             $out['contributorApplicationId'] = $app_id_meta;
@@ -2007,6 +2132,125 @@ class Post_Extractor_API {
         return rest_ensure_response( $data );
     }
 
+    public function post_cancel_citizen_submission( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+        $id = (int) $request->get_param( 'id' );
+        $post = get_post( $id );
+        if ( ! $post || $post->post_type !== Post_Extractor_Citizen::POST_TYPE ) {
+            return new WP_Error( 'rest_not_found', __( 'Submission not found.', 'post-extractor' ), [ 'status' => 404 ] );
+        }
+        if ( in_array( $post->post_status, [ 'trash', 'auto-draft' ], true ) ) {
+            return new WP_Error( 'rest_not_found', __( 'Submission is not active.', 'post-extractor' ), [ 'status' => 404 ] );
+        }
+        $status = $this->map_citizen_app_status( $post );
+        if ( $status !== 'pendingReview' ) {
+            return new WP_Error(
+                'pe_submission_cancel_not_allowed',
+                __( 'Only pending submissions can be cancelled.', 'post-extractor' ),
+                [ 'status' => 409 ]
+            );
+        }
+        $body = $request->get_json_params();
+        if ( ! is_array( $body ) ) {
+            $body = [];
+        }
+        $email = sanitize_email( (string) ( $body['email'] ?? '' ) );
+        if ( $email === '' || ! is_email( $email ) ) {
+            return new WP_Error( 'rest_invalid_param', __( 'Valid email is required.', 'post-extractor' ), [ 'status' => 400 ] );
+        }
+        $app_id = (int) get_post_meta( $id, Post_Extractor_Citizen::META_CONTRIBUTOR_APP_ID, true );
+        if ( $app_id < 1 ) {
+            return new WP_Error( 'pe_submission_cancel_not_allowed', __( 'This submission cannot be cancelled.', 'post-extractor' ), [ 'status' => 409 ] );
+        }
+        $app_post = get_post( $app_id );
+        if ( ! $app_post || $app_post->post_type !== Post_Extractor_Contributor_App::POST_TYPE ) {
+            return new WP_Error( 'pe_submission_cancel_not_allowed', __( 'Contributor application record is missing.', 'post-extractor' ), [ 'status' => 409 ] );
+        }
+        $stored_email = sanitize_email( (string) get_post_meta( $app_id, Post_Extractor_Contributor_App::META_EMAIL, true ) );
+        if ( $stored_email === '' || ! hash_equals( strtolower( $stored_email ), strtolower( $email ) ) ) {
+            return new WP_Error( 'rest_forbidden', __( 'Email does not match this submission.', 'post-extractor' ), [ 'status' => 403 ] );
+        }
+        $reason = trim( wp_strip_all_tags( (string) ( $body['reason'] ?? '' ), true ) );
+        if ( $reason === '' ) {
+            $reason = __( 'Cancelled by contributor from the mobile app.', 'post-extractor' );
+        }
+        if ( strlen( $reason ) > 2000 ) {
+            $reason = (string) mb_substr( $reason, 0, 2000 );
+        }
+        update_post_meta( $id, Post_Extractor_Citizen::META_MODERATION, 'rejected' );
+        update_post_meta( $id, self::META_CITIZEN_REJECTION_REASON, $reason );
+        update_post_meta( $id, self::META_CITIZEN_CANCELLED_BY_CONTRIBUTOR, 1 );
+        update_post_meta( $id, self::META_CITIZEN_CANCELLED_AT, gmdate( 'c' ) );
+        wp_update_post(
+            [
+                'ID'          => $id,
+                'post_status' => 'draft',
+            ]
+        );
+        do_action( 'post_extractor_citizen_submission_cancelled_by_contributor', $id, $app_id, $email );
+        $fresh = get_post( $id );
+        if ( ! $fresh ) {
+            return new WP_Error( 'rest_not_found', __( 'Submission not found.', 'post-extractor' ), [ 'status' => 404 ] );
+        }
+        $data = $this->build_citizen_submission_array( $fresh );
+        if ( is_wp_error( $data ) ) {
+            return $data;
+        }
+        return rest_ensure_response( $data );
+    }
+
+    public function post_undo_cancel_citizen_submission( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+        $id = (int) $request->get_param( 'id' );
+        $post = get_post( $id );
+        if ( ! $post || $post->post_type !== Post_Extractor_Citizen::POST_TYPE ) {
+            return new WP_Error( 'rest_not_found', __( 'Submission not found.', 'post-extractor' ), [ 'status' => 404 ] );
+        }
+        $body = $request->get_json_params();
+        if ( ! is_array( $body ) ) {
+            $body = [];
+        }
+        $email = sanitize_email( (string) ( $body['email'] ?? '' ) );
+        if ( $email === '' || ! is_email( $email ) ) {
+            return new WP_Error( 'rest_invalid_param', __( 'Valid email is required.', 'post-extractor' ), [ 'status' => 400 ] );
+        }
+        $app_id = (int) get_post_meta( $id, Post_Extractor_Citizen::META_CONTRIBUTOR_APP_ID, true );
+        if ( $app_id < 1 ) {
+            return new WP_Error( 'pe_submission_undo_not_allowed', __( 'This submission cannot be restored.', 'post-extractor' ), [ 'status' => 409 ] );
+        }
+        $stored_email = sanitize_email( (string) get_post_meta( $app_id, Post_Extractor_Contributor_App::META_EMAIL, true ) );
+        if ( $stored_email === '' || ! hash_equals( strtolower( $stored_email ), strtolower( $email ) ) ) {
+            return new WP_Error( 'rest_forbidden', __( 'Email does not match this submission.', 'post-extractor' ), [ 'status' => 403 ] );
+        }
+        $cancelled = (int) get_post_meta( $id, self::META_CITIZEN_CANCELLED_BY_CONTRIBUTOR, true ) === 1;
+        $cancelled_at = (string) get_post_meta( $id, self::META_CITIZEN_CANCELLED_AT, true );
+        $undo_window_seconds = $this->contributor_cancel_undo_window_seconds();
+        $ts = strtotime( $cancelled_at );
+        if ( ! $cancelled || ! is_int( $ts ) || $ts <= 0 ) {
+            return new WP_Error( 'pe_submission_undo_not_allowed', __( 'This submission cannot be restored.', 'post-extractor' ), [ 'status' => 409 ] );
+        }
+        if ( time() > ( $ts + $undo_window_seconds ) ) {
+            return new WP_Error( 'pe_submission_undo_expired', __( 'Undo window expired. Submit a new story.', 'post-extractor' ), [ 'status' => 409 ] );
+        }
+        update_post_meta( $id, Post_Extractor_Citizen::META_MODERATION, 'pending' );
+        delete_post_meta( $id, self::META_CITIZEN_REJECTION_REASON );
+        delete_post_meta( $id, self::META_CITIZEN_CANCELLED_BY_CONTRIBUTOR );
+        delete_post_meta( $id, self::META_CITIZEN_CANCELLED_AT );
+        wp_update_post(
+            [
+                'ID'          => $id,
+                'post_status' => 'pending',
+            ]
+        );
+        $fresh = get_post( $id );
+        if ( ! $fresh ) {
+            return new WP_Error( 'rest_not_found', __( 'Submission not found.', 'post-extractor' ), [ 'status' => 404 ] );
+        }
+        $data = $this->build_citizen_submission_array( $fresh );
+        if ( is_wp_error( $data ) ) {
+            return $data;
+        }
+        return rest_ensure_response( $data );
+    }
+
     public function get_citizen_submissions_batch( WP_REST_Request $request ): WP_REST_Response|WP_Error {
         $raw = (string) $request->get_param( 'ids' );
         if ( $raw === '' ) {
@@ -2140,6 +2384,19 @@ class Post_Extractor_API {
         $src   = (string) get_post_meta( $post->ID, Post_Extractor_Contributor_App::META_SOURCE, true );
         $rej   = (string) get_post_meta( $post->ID, Post_Extractor_Contributor_Moderation::META_REJECTION_REASON, true );
         $wpuid = (int) get_post_meta( $post->ID, Post_Extractor_Contributor_Moderation::META_LINKED_USER_ID, true );
+        $cancelled_by_applicant = (int) get_post_meta( $post->ID, self::META_CANCELLED_BY_APPLICANT, true ) === 1;
+        $cancelled_at = (string) get_post_meta( $post->ID, self::META_CANCELLED_AT, true );
+        $undo_window_seconds = $this->contributor_cancel_undo_window_seconds();
+        $undo_until_iso = null;
+        $can_undo_cancel = false;
+        if ( $cancelled_by_applicant && $status === 'rejected' ) {
+            $ts = strtotime( $cancelled_at );
+            if ( is_int( $ts ) && $ts > 0 ) {
+                $undo_until = $ts + $undo_window_seconds;
+                $undo_until_iso = gmdate( 'c', $undo_until );
+                $can_undo_cancel = time() <= $undo_until;
+            }
+        }
         $list  = [
             'id'                 => (int) $post->ID,
             'name'               => $name,
@@ -2157,6 +2414,9 @@ class Post_Extractor_API {
             'source'             => $src !== '' ? $src : 'newsbepa',
             'rejectionReason'   => ( $status === 'rejected' && $rej !== '' ) ? $rej : null,
             'wordpressUserId'  => ( $status === 'approved' && $wpuid > 0 ) ? $wpuid : null,
+            'cancelledByApplicant' => $cancelled_by_applicant,
+            'cancelUndoUntil'      => $undo_until_iso,
+            'canUndoCancel'        => $can_undo_cancel,
         ];
         return $list;
     }
@@ -2304,6 +2564,128 @@ class Post_Extractor_API {
         return rest_ensure_response( $data );
     }
 
+    public function post_cancel_contributor_application( WP_REST_Request $req ): WP_REST_Response|WP_Error {
+        $id   = (int) $req->get_param( 'id' );
+        $post = get_post( $id );
+        if ( ! $post || $post->post_type !== Post_Extractor_Contributor_App::POST_TYPE ) {
+            return new WP_Error( 'rest_not_found', __( 'Application not found.', 'post-extractor' ), [ 'status' => 404 ] );
+        }
+        if ( in_array( $post->post_status, [ 'trash', 'auto-draft' ], true ) ) {
+            return new WP_Error( 'rest_not_found', __( 'Application is not active.', 'post-extractor' ), [ 'status' => 404 ] );
+        }
+        $status = $this->map_contributor_application_status( $post );
+        if ( $status === 'approved' ) {
+            return new WP_Error(
+                'pe_cancel_not_allowed',
+                __( 'Approved applications cannot be cancelled in-app. Contact editorial support.', 'post-extractor' ),
+                [ 'status' => 409 ]
+            );
+        }
+        if ( $status === 'rejected' ) {
+            $data = $this->build_contributor_application_array( $post );
+            if ( is_wp_error( $data ) ) {
+                return $data;
+            }
+            return rest_ensure_response( $data );
+        }
+
+        $body = $req->get_json_params();
+        if ( ! is_array( $body ) ) {
+            $body = [];
+        }
+        $email = sanitize_email( (string) ( $body['email'] ?? '' ) );
+        if ( $email === '' || ! is_email( $email ) ) {
+            return new WP_Error( 'rest_invalid_param', __( 'Valid email is required.', 'post-extractor' ), [ 'status' => 400 ] );
+        }
+        $stored_email = sanitize_email( (string) get_post_meta( $id, Post_Extractor_Contributor_App::META_EMAIL, true ) );
+        if ( $stored_email === '' || ! hash_equals( strtolower( $stored_email ), strtolower( $email ) ) ) {
+            return new WP_Error(
+                'rest_forbidden',
+                __( 'Email does not match this application.', 'post-extractor' ),
+                [ 'status' => 403 ]
+            );
+        }
+
+        $reason = trim( wp_strip_all_tags( (string) ( $body['reason'] ?? '' ), true ) );
+        if ( $reason === '' ) {
+            $reason = __( 'Cancelled by applicant from the mobile app.', 'post-extractor' );
+        }
+        if ( strlen( $reason ) > 2000 ) {
+            $reason = (string) mb_substr( $reason, 0, 2000 );
+        }
+
+        update_post_meta( $id, Post_Extractor_Contributor_Moderation::META_REJECTION_REASON, $reason );
+        update_post_meta( $id, Post_Extractor_Contributor_App::META_MODERATION, 'rejected' );
+        update_post_meta( $id, self::META_CANCELLED_BY_APPLICANT, 1 );
+        update_post_meta( $id, self::META_CANCELLED_AT, gmdate( 'c' ) );
+        wp_update_post(
+            [
+                'ID'          => $id,
+                'post_status' => 'draft',
+            ]
+        );
+
+        do_action( 'post_extractor_contributor_cancelled_by_applicant', $id, $email );
+        $fresh = get_post( $id );
+        if ( ! $fresh ) {
+            return new WP_Error( 'rest_not_found', __( 'Application not found.', 'post-extractor' ), [ 'status' => 404 ] );
+        }
+        $data = $this->build_contributor_application_array( $fresh );
+        if ( is_wp_error( $data ) ) {
+            return $data;
+        }
+        return rest_ensure_response( $data );
+    }
+
+    public function post_undo_cancel_contributor_application( WP_REST_Request $req ): WP_REST_Response|WP_Error {
+        $id = (int) $req->get_param( 'id' );
+        $post = get_post( $id );
+        if ( ! $post || $post->post_type !== Post_Extractor_Contributor_App::POST_TYPE ) {
+            return new WP_Error( 'rest_not_found', __( 'Application not found.', 'post-extractor' ), [ 'status' => 404 ] );
+        }
+        $body = $req->get_json_params();
+        if ( ! is_array( $body ) ) {
+            $body = [];
+        }
+        $email = sanitize_email( (string) ( $body['email'] ?? '' ) );
+        if ( $email === '' || ! is_email( $email ) ) {
+            return new WP_Error( 'rest_invalid_param', __( 'Valid email is required.', 'post-extractor' ), [ 'status' => 400 ] );
+        }
+        $stored_email = sanitize_email( (string) get_post_meta( $id, Post_Extractor_Contributor_App::META_EMAIL, true ) );
+        if ( $stored_email === '' || ! hash_equals( strtolower( $stored_email ), strtolower( $email ) ) ) {
+            return new WP_Error( 'rest_forbidden', __( 'Email does not match this application.', 'post-extractor' ), [ 'status' => 403 ] );
+        }
+        $cancelled = (int) get_post_meta( $id, self::META_CANCELLED_BY_APPLICANT, true ) === 1;
+        $cancelled_at = (string) get_post_meta( $id, self::META_CANCELLED_AT, true );
+        $undo_window_seconds = $this->contributor_cancel_undo_window_seconds();
+        $ts = strtotime( $cancelled_at );
+        if ( ! $cancelled || ! is_int( $ts ) || $ts <= 0 ) {
+            return new WP_Error( 'pe_undo_not_allowed', __( 'This application cannot be restored.', 'post-extractor' ), [ 'status' => 409 ] );
+        }
+        if ( time() > ( $ts + $undo_window_seconds ) ) {
+            return new WP_Error( 'pe_undo_expired', __( 'Undo window expired. Submit a new application.', 'post-extractor' ), [ 'status' => 409 ] );
+        }
+        update_post_meta( $id, Post_Extractor_Contributor_App::META_MODERATION, 'pending' );
+        delete_post_meta( $id, Post_Extractor_Contributor_Moderation::META_REJECTION_REASON );
+        delete_post_meta( $id, self::META_CANCELLED_BY_APPLICANT );
+        delete_post_meta( $id, self::META_CANCELLED_AT );
+        wp_update_post(
+            [
+                'ID'          => $id,
+                'post_status' => 'pending',
+            ]
+        );
+        $fresh = get_post( $id );
+        if ( ! $fresh ) {
+            return new WP_Error( 'rest_not_found', __( 'Application not found.', 'post-extractor' ), [ 'status' => 404 ] );
+        }
+        $data = $this->build_contributor_application_array( $fresh );
+        if ( is_wp_error( $data ) ) {
+            return $data;
+        }
+        return rest_ensure_response( $data );
+    }
+
     /**
      * @param int    $app_id  Contributor application post id on this site.
      * @param string $pub_camel Expected Publication.name value (e.g. myKasi).
@@ -2408,7 +2790,7 @@ class Post_Extractor_API {
         if ( $u === '' || $p === '' ) {
             return new WP_Error( 'pe_editorial_invalid', __( 'Username and password are required.', 'post-extractor' ), [ 'status' => 400 ] );
         }
-        $opt   = get_option( Post_Extractor_Settings::OPTION_KEY, [] );
+        $opt   = $this->get_settings();
         $ok_u  = (string) ( $opt['newsbepa_editorial_user'] ?? '' );
         $hash  = (string) ( $opt['newsbepa_editorial_hash'] ?? '' );
         if ( $ok_u === '' || $hash === '' ) {
@@ -2452,7 +2834,7 @@ class Post_Extractor_API {
     /**
      * @return array{items: array<int, array<string, mixed>>, total: int, page: int, perPage: int, totalPages: int, siteName: string, siteUrl: string}
      */
-    private function run_editorial_paginated_cpt( string $post_type, callable $row_builder, int $page, int $per_page ): array {
+    private function run_editorial_paginated_cpt( string $post_type, callable $row_builder, int $page, int $per_page, array $query_overrides = [] ): array {
         if ( $page < 1 ) {
             $page = 1;
         }
@@ -2462,19 +2844,19 @@ class Post_Extractor_API {
         if ( $per_page > 100 ) {
             $per_page = 100;
         }
-        $q = new WP_Query(
-            [
-                'post_type'              => $post_type,
-                'post_status'            => 'any',
-                'posts_per_page'         => $per_page,
-                'paged'                  => $page,
-                'orderby'                => 'date',
-                'order'                  => 'DESC',
-                'no_found_rows'          => false,
-                'update_post_meta_cache' => true,
-                'update_post_term_cache' => false,
-            ]
-        );
+        $base_args = [
+            'post_type'              => $post_type,
+            'post_status'            => 'any',
+            'posts_per_page'         => $per_page,
+            'paged'                  => $page,
+            'orderby'                => 'date',
+            'order'                  => 'DESC',
+            'no_found_rows'          => false,
+            'update_post_meta_cache' => true,
+            'update_post_term_cache' => false,
+            'ignore_sticky_posts'    => true,
+        ];
+        $q = new WP_Query( array_merge( $base_args, $query_overrides ) );
         $items = [];
         foreach ( $q->posts as $post ) {
             if ( ! ( $post instanceof WP_Post ) || $post->post_type !== $post_type ) {
@@ -2510,6 +2892,129 @@ class Post_Extractor_API {
         ];
     }
 
+    /**
+     * @return array<string, mixed>
+     */
+    private function contributor_editorial_query_overrides( string $status, string $q ): array {
+        $args = [];
+        if ( $status === 'pending' ) {
+            $args['meta_query'] = [
+                [
+                    'key'   => Post_Extractor_Contributor_App::META_MODERATION,
+                    'value' => 'pending',
+                ],
+            ];
+        } elseif ( $status === 'approved' ) {
+            $args['meta_query'] = [
+                [
+                    'key'   => Post_Extractor_Contributor_App::META_MODERATION,
+                    'value' => 'approved',
+                ],
+            ];
+        } elseif ( $status === 'rejected' ) {
+            $args['meta_query'] = [
+                [
+                    'key'     => Post_Extractor_Contributor_App::META_MODERATION,
+                    'value'   => [ 'rejected', 'denied' ],
+                    'compare' => 'IN',
+                ],
+            ];
+        }
+        if ( $q !== '' ) {
+            $search_group = [
+                'relation' => 'OR',
+                [
+                    'key'     => Post_Extractor_Contributor_App::META_FULL_NAME,
+                    'value'   => $q,
+                    'compare' => 'LIKE',
+                ],
+                [
+                    'key'     => Post_Extractor_Contributor_App::META_EMAIL,
+                    'value'   => $q,
+                    'compare' => 'LIKE',
+                ],
+                [
+                    'key'     => Post_Extractor_Contributor_App::META_PUBLICATION,
+                    'value'   => $q,
+                    'compare' => 'LIKE',
+                ],
+                [
+                    'key'     => Post_Extractor_Contributor_App::META_PUBS_JSON,
+                    'value'   => $q,
+                    'compare' => 'LIKE',
+                ],
+            ];
+            if ( isset( $args['meta_query'] ) && is_array( $args['meta_query'] ) ) {
+                $args['meta_query'] = [
+                    'relation' => 'AND',
+                    $args['meta_query'][0],
+                    $search_group,
+                ];
+            } else {
+                $args['meta_query'] = [ $search_group ];
+            }
+        }
+        return $args;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function citizen_editorial_query_overrides( string $status, string $q ): array {
+        $args = [];
+        if ( $status === 'pendingreview' ) {
+            $args['meta_query'] = [
+                [
+                    'key'     => Post_Extractor_Citizen::META_MODERATION,
+                    'value'   => [ 'pending', 'pendingreview' ],
+                    'compare' => 'IN',
+                ],
+            ];
+        } elseif ( $status === 'verified' ) {
+            $args['meta_query'] = [
+                [
+                    'key'     => Post_Extractor_Citizen::META_MODERATION,
+                    'value'   => [ 'approved', 'verified' ],
+                    'compare' => 'IN',
+                ],
+            ];
+        } elseif ( $status === 'rejected' ) {
+            $args['meta_query'] = [
+                [
+                    'key'     => Post_Extractor_Citizen::META_MODERATION,
+                    'value'   => [ 'rejected', 'denied' ],
+                    'compare' => 'IN',
+                ],
+            ];
+        }
+        if ( $q !== '' ) {
+            $search_group = [
+                'relation' => 'OR',
+                [
+                    'key'     => '_pe_location',
+                    'value'   => $q,
+                    'compare' => 'LIKE',
+                ],
+                [
+                    'key'     => '_pe_publication',
+                    'value'   => $q,
+                    'compare' => 'LIKE',
+                ],
+            ];
+            if ( isset( $args['meta_query'] ) && is_array( $args['meta_query'] ) ) {
+                $args['meta_query'] = [
+                    'relation' => 'AND',
+                    $args['meta_query'][0],
+                    $search_group,
+                ];
+            } else {
+                $args['meta_query'] = [ $search_group ];
+            }
+            $args['s'] = $q;
+        }
+        return $args;
+    }
+
     public function get_editorial_contributor_list( WP_REST_Request $req ): WP_REST_Response {
         $page     = (int) $req->get_param( 'page' );
         $per_page = (int) $req->get_param( 'per_page' );
@@ -2521,7 +3026,8 @@ class Post_Extractor_API {
                 return $this->build_contributor_application_array( $post );
             },
             $page,
-            $per_page
+            $per_page,
+            $this->contributor_editorial_query_overrides( $status, $q )
         );
         $allowed_status = [ 'all', 'pending', 'approved', 'rejected' ];
         if ( ! in_array( $status, $allowed_status, true ) ) {
@@ -2611,6 +3117,89 @@ class Post_Extractor_API {
         return new WP_Error( $code, $e->get_error_message(), [ 'status' => $status ] );
     }
 
+    public function post_editorial_citizen_approve( WP_REST_Request $req ): WP_REST_Response|WP_Error {
+        $id = (int) $req->get_param( 'id' );
+        $post = get_post( $id );
+        if ( ! $post || $post->post_type !== Post_Extractor_Citizen::POST_TYPE ) {
+            return new WP_Error( 'rest_not_found', __( 'Submission not found.', 'post-extractor' ), [ 'status' => 404 ] );
+        }
+        if ( in_array( $post->post_status, [ 'trash', 'auto-draft' ], true ) ) {
+            return new WP_Error( 'pe_citizen_inactive', __( 'This submission is not active.', 'post-extractor' ), [ 'status' => 410 ] );
+        }
+        $status = $this->map_citizen_app_status( $post );
+        if ( $status === 'verified' ) {
+            $data = $this->build_citizen_submission_array( $post );
+            if ( is_wp_error( $data ) ) {
+                return $data;
+            }
+            return rest_ensure_response( $data );
+        }
+        update_post_meta( $id, Post_Extractor_Citizen::META_MODERATION, 'approved' );
+        delete_post_meta( $id, self::META_CITIZEN_REJECTION_REASON );
+        wp_update_post(
+            [
+                'ID'          => $id,
+                'post_status' => 'publish',
+            ]
+        );
+        do_action( 'post_extractor_citizen_submission_approved', $id, 'rest' );
+        $fresh = get_post( $id );
+        if ( ! $fresh ) {
+            return new WP_Error( 'rest_not_found', __( 'Submission not found.', 'post-extractor' ), [ 'status' => 404 ] );
+        }
+        $data = $this->build_citizen_submission_array( $fresh );
+        if ( is_wp_error( $data ) ) {
+            return $data;
+        }
+        return rest_ensure_response( $data );
+    }
+
+    public function post_editorial_citizen_reject( WP_REST_Request $req ): WP_REST_Response|WP_Error {
+        $id = (int) $req->get_param( 'id' );
+        $post = get_post( $id );
+        if ( ! $post || $post->post_type !== Post_Extractor_Citizen::POST_TYPE ) {
+            return new WP_Error( 'rest_not_found', __( 'Submission not found.', 'post-extractor' ), [ 'status' => 404 ] );
+        }
+        if ( in_array( $post->post_status, [ 'trash', 'auto-draft' ], true ) ) {
+            return new WP_Error( 'pe_citizen_inactive', __( 'This submission is not active.', 'post-extractor' ), [ 'status' => 410 ] );
+        }
+        $body = $req->get_json_params();
+        $reason = '';
+        if ( is_array( $body ) && isset( $body['reason'] ) && $body['reason'] !== null ) {
+            $reason = (string) $body['reason'];
+        } else {
+            $p = $req->get_param( 'reason' );
+            if ( $p !== null && $p !== '' ) {
+                $reason = (string) $p;
+            }
+        }
+        $reason = trim( wp_strip_all_tags( $reason, true ) );
+        if ( $reason === '' ) {
+            $reason = __( 'Rejected by editorial review.', 'post-extractor' );
+        }
+        if ( strlen( $reason ) > 2000 ) {
+            $reason = (string) mb_substr( $reason, 0, 2000 );
+        }
+        update_post_meta( $id, Post_Extractor_Citizen::META_MODERATION, 'rejected' );
+        update_post_meta( $id, self::META_CITIZEN_REJECTION_REASON, $reason );
+        wp_update_post(
+            [
+                'ID'          => $id,
+                'post_status' => 'draft',
+            ]
+        );
+        do_action( 'post_extractor_citizen_submission_rejected', $id, $reason, 'rest' );
+        $fresh = get_post( $id );
+        if ( ! $fresh ) {
+            return new WP_Error( 'rest_not_found', __( 'Submission not found.', 'post-extractor' ), [ 'status' => 404 ] );
+        }
+        $data = $this->build_citizen_submission_array( $fresh );
+        if ( is_wp_error( $data ) ) {
+            return $data;
+        }
+        return rest_ensure_response( $data );
+    }
+
     public function get_editorial_citizen_list( WP_REST_Request $req ): WP_REST_Response {
         $page     = (int) $req->get_param( 'page' );
         $per_page = (int) $req->get_param( 'per_page' );
@@ -2622,7 +3211,8 @@ class Post_Extractor_API {
                 return $this->build_citizen_submission_array( $post );
             },
             $page,
-            $per_page
+            $per_page,
+            $this->citizen_editorial_query_overrides( $status, $q )
         );
         $allowed_status = [ 'all', 'pendingreview', 'verified', 'rejected' ];
         if ( ! in_array( $status, $allowed_status, true ) ) {
