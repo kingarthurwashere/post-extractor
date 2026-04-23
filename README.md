@@ -4,6 +4,41 @@ Extends the WordPress REST API with a cross-type posts feed, Gutenberg section d
 
 ---
 
+## What this plugin can do
+
+- Serve a unified, app-friendly content API across WordPress post types.
+- Return embedded author/media/taxonomy fields plus Gutenberg `sections`.
+- Expose taxonomy and CPT discovery endpoints for dynamic app layouts.
+- Provide site branding payloads via `GET /site-identity`.
+- Enforce API-key access and request-rate limiting.
+- Accept contributor applications and citizen story submissions.
+- Support editorial session login and moderation list/action endpoints.
+- Provide operational health metadata via `GET /health`.
+- Provide ad placement configuration payloads for app monetization UI.
+- Ingest analytics events and expose editorial analytics summaries.
+- Track contributor earnings and expose payout ledgers by application id.
+
+## Delivery status checklist
+
+### MVP-ready in plugin
+- [x] Content feed API (`/posts`, `/posts/{id}`, `/categories`)
+- [x] CPT discovery/sections endpoints (`/cpt-slugs`, `/cpt`, `/cpt-sections`)
+- [x] Site identity endpoint (`/site-identity`)
+- [x] API key protection + request throttling
+- [x] Contributor application + citizen submission endpoints
+- [x] Editorial login + moderation list/action endpoints
+- [x] Health endpoint (`/health`)
+- [x] SQL-backed storage tables for premium entitlements, analytics, and contributor earnings
+
+### Future backend phases
+- [ ] Webhook/event stream for external automation
+- [ ] Rich analytics endpoints for product dashboards
+- [ ] Advanced abuse protection and anomaly detection
+- [ ] Fine-grained API key scopes and rotation policies
+- [ ] Background job processing for heavier editorial workflows
+
+---
+
 ## Flutter → Plugin endpoint mapping
 
 | Flutter `WordPressService` method | Plugin endpoint |
@@ -17,6 +52,24 @@ Extends the WordPress REST API with a cross-type posts feed, Gutenberg section d
 | `getCustomPostTypeSections(publication)` | `GET /cpt-sections` |
 | `getPost(id, publication)` | `GET /posts/{id}` |
 | `searchAllPublications(query)` | `GET /posts?search=…` |
+
+---
+
+## Database architecture (production path)
+
+The plugin now provisions custom SQL tables (via activation + auto schema check):
+
+- `wp_pe_premium_entitlements`
+- `wp_pe_analytics_daily`
+- `wp_pe_contributor_earnings`
+
+These back:
+
+- premium entitlement verification/status
+- analytics event ingestion + summary aggregation
+- contributor earnings credits + ledger retrieval
+
+> Table prefix follows your WordPress prefix (example uses `wp_`).
 
 ---
 
@@ -169,6 +222,149 @@ All CPTs × items in one round-trip. Equivalent to calling `getCustomPostTypeSec
   { "slug": "podcasts", "label": "Podcasts", "items": [ ... ] }
 ]
 ```
+
+---
+
+### `GET /health`
+Operational backend status for checks/monitoring.
+
+```bash
+curl -H "X-PE-API-Key: <key>" \
+  "https://yoursite.com/wp-json/post-extractor/v1/health"
+```
+
+Example response:
+
+```json
+{
+  "ok": true,
+  "namespace": "post-extractor/v1",
+  "plugin_version": "1.5.4",
+  "timestamp_utc": "2026-04-23T20:10:11+00:00",
+  "site_name": "My Afrika Magazine",
+  "site_url": "https://myafrikamag.com/",
+  "api_key_configured": true,
+  "rate_limit_per_minute": 120,
+  "editorial_configured": true,
+  "extractable_types": ["post", "videos", "pe_citizen", "pe_contrib_app"],
+  "extractable_total": 4
+}
+```
+
+---
+
+### `GET /editorial/contributor-applications`
+Editorial list endpoint (requires `X-PE-Editorial-Token`).
+
+Optional server-side filters:
+
+| Param | Values | Notes |
+|---|---|---|
+| `status` | `all`, `pending`, `approved`, `rejected` | Default `all` |
+| `q` | text | Matches applicant `name`, `email`, `publication` |
+
+```bash
+curl -H "X-PE-Editorial-Token: <token>" \
+  "https://yoursite.com/wp-json/post-extractor/v1/editorial/contributor-applications?page=1&per_page=30&status=pending&q=mykasi"
+```
+
+---
+
+### `GET /editorial/citizen-submissions`
+Editorial list endpoint (requires `X-PE-Editorial-Token`).
+
+Optional server-side filters:
+
+| Param | Values | Notes |
+|---|---|---|
+| `status` | `all`, `pendingreview`, `verified`, `rejected` | Default `all` |
+| `q` | text | Matches pitch `headline`, `location`, `publication` |
+
+```bash
+curl -H "X-PE-Editorial-Token: <token>" \
+  "https://yoursite.com/wp-json/post-extractor/v1/editorial/citizen-submissions?page=1&per_page=30&status=verified&q=bulawayo"
+```
+
+---
+
+### `GET /premium/entitlement`
+Returns premium status for a device.
+
+| Param | Required | Notes |
+|---|---|---|
+| `device_id` | yes | App-generated stable device id |
+
+```bash
+curl -H "X-PE-API-Key: <key>" \
+  "https://yoursite.com/wp-json/post-extractor/v1/premium/entitlement?device_id=device_123"
+```
+
+### `POST /premium/entitlement/verify`
+Stores purchase evidence and updates entitlement.
+
+Body (JSON):
+
+| Field | Required | Notes |
+|---|---|---|
+| `device_id` | yes | App device id |
+| `platform` | yes | `android` or `ios` |
+| `product_id` | yes | Store product id |
+| `purchase_id` | yes | Transaction / purchase id |
+| `purchase_token` | yes | Store verification token |
+| `expires_at` | no | ISO timestamp for subscription expiry |
+
+```bash
+curl -X POST -H "Content-Type: application/json" \
+  -H "X-PE-API-Key: <key>" \
+  -d '{"device_id":"device_123","platform":"android","product_id":"newsbepa.premium.monthly","purchase_id":"GPA.1234","purchase_token":"token"}' \
+  "https://yoursite.com/wp-json/post-extractor/v1/premium/entitlement/verify"
+```
+
+> Current implementation uses `verified_mode: server_stub` as scaffolding. Replace with Google Play / App Store server verification in production.
+
+Production path:
+- Configure **Premium verifier URL** in Settings → Post Extractor.
+- Optional bearer auth via **Premium verifier bearer token**.
+- Enable **Premium strict mode** to fail-closed if verifier is unavailable.
+- Verifier should return JSON: `{ "ok": true, "active": true|false, "expires_at": "...", "verified_mode": "provider_google_apple" }`.
+
+---
+
+### `GET /ads/placements`
+Monetization placement payloads for app surfaces.
+
+Optional query:
+- `publication`
+- `placement`
+
+### `POST /analytics/events`
+Stores product analytics events (API key required).
+
+Body (JSON):
+- `event` (required)
+- `publication` (optional)
+- `format` (optional, default `article`)
+
+### `GET /analytics/summary`
+Editorial analytics summary endpoint (requires `X-PE-Editorial-Token`).
+
+Query:
+- `days` (1..365, default 30)
+
+### `GET /contributors/earnings`
+Returns contributor earnings ledger by application id.
+
+Query:
+- `application_id` (required)
+
+### `POST /editorial/contributor-earnings/credit`
+Credits contributor earnings entry (requires editorial token).
+
+Body (JSON):
+- `application_id` (required)
+- `amount` (required, >0)
+- `note` (optional)
+- `story_id` (optional)
 
 ---
 

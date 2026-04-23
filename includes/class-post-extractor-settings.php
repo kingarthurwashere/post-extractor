@@ -77,6 +77,20 @@ class Post_Extractor_Settings {
 			$clean['newsbepa_editorial_hash'] = (string) ( $prev['newsbepa_editorial_hash'] ?? '' );
 		}
 
+		$clean['premium_verify_url'] = '';
+		if ( isset( $input['premium_verify_url'] ) && is_string( $input['premium_verify_url'] ) ) {
+			$clean['premium_verify_url'] = esc_url_raw( trim( $input['premium_verify_url'] ) );
+		}
+		$clean['premium_verify_bearer'] = '';
+		if ( isset( $input['premium_verify_bearer'] ) && is_string( $input['premium_verify_bearer'] ) ) {
+			$clean['premium_verify_bearer'] = sanitize_text_field( $input['premium_verify_bearer'] );
+		}
+		$clean['premium_verify_timeout'] = 8;
+		if ( isset( $input['premium_verify_timeout'] ) && $input['premium_verify_timeout'] !== '' ) {
+			$clean['premium_verify_timeout'] = max( 2, min( 30, absint( $input['premium_verify_timeout'] ) ) );
+		}
+		$clean['premium_verify_strict'] = ! empty( $input['premium_verify_strict'] ) ? 1 : 0;
+
 		return $clean;
 	}
 
@@ -114,6 +128,25 @@ class Post_Extractor_Settings {
 			update_option( self::OPTION_KEY, $options );
 			echo '<div class="notice notice-success"><p>' . esc_html__( 'A new content API key was generated.', 'post-extractor' ) . '</p></div>';
 		}
+		if (
+			isset( $_POST['run_db_health_check'] )
+			&& check_admin_referer( self::NONCE_KEY )
+		) {
+			$health = $this->run_db_health_check();
+			$klass = ! empty( $health['ok'] ) ? 'notice notice-success' : 'notice notice-warning';
+			$summary = isset( $health['summary'] ) ? (string) $health['summary'] : '';
+			echo '<div class="' . esc_attr( $klass ) . '"><p><strong>' .
+				esc_html__( 'DB health check:', 'post-extractor' ) . '</strong> ' .
+				esc_html( $summary ) . '</p>';
+			if ( ! empty( $health['details'] ) && is_array( $health['details'] ) ) {
+				echo '<ul style="margin:0 0 8px 1.2em;list-style:disc;">';
+				foreach ( $health['details'] as $line ) {
+					echo '<li>' . esc_html( (string) $line ) . '</li>';
+				}
+				echo '</ul>';
+			}
+			echo '</div>';
+		}
 
 		$options        = get_option( self::OPTION_KEY, [] );
 		$api_key    = $options['api_key'] ?? '';
@@ -123,6 +156,10 @@ class Post_Extractor_Settings {
 		$rate_limit     = isset( $options['rate_limit_per_minute'] ) ? (int) $options['rate_limit_per_minute'] : 120;
 		$nbedit_user    = (string) ( $options['newsbepa_editorial_user'] ?? '' );
 		$nbedit_has_pw  = ! empty( $options['newsbepa_editorial_hash'] );
+		$premium_verify_url = (string) ( $options['premium_verify_url'] ?? '' );
+		$premium_verify_bearer = (string) ( $options['premium_verify_bearer'] ?? '' );
+		$premium_verify_timeout = isset( $options['premium_verify_timeout'] ) ? (int) $options['premium_verify_timeout'] : 8;
+		$premium_verify_strict = isset( $options['premium_verify_strict'] ) && (int) $options['premium_verify_strict'] === 1;
 		$wp_core_groups = $this->discover_wp_core_endpoint_groups();
 
 		$pt_citizen = class_exists( 'Post_Extractor_Citizen' ) ? Post_Extractor_Citizen::POST_TYPE : 'pe_citizen';
@@ -135,6 +172,7 @@ class Post_Extractor_Settings {
 		$n_all_a    = is_object( $cnt_app ) ? (int) array_sum( (array) $cnt_app ) : 0;
 		$url_cit    = admin_url( 'edit.php?post_type=' . $pt_citizen );
 		$url_app    = admin_url( 'edit.php?post_type=' . $pt_contrib );
+		$db_stats   = $this->get_db_diagnostics_stats();
 
 		?>
 		<div id="pe-admin-root" class="wrap pe-admin" role="region" aria-label="<?php esc_attr_e( 'Post Extractor', 'post-extractor' ); ?>">
@@ -213,6 +251,41 @@ class Post_Extractor_Settings {
 							<?php esc_html_e( 'Open contributor applications (wp-admin list)', 'post-extractor' ); ?>
 						</a>
 					</div>
+					<?php if ( ! empty( $db_stats ) ) : ?>
+						<div class="pe-panel__inner" style="margin-top:12px;border-left:3px solid #2271b1;">
+							<h3 class="pe-section-title" style="margin-top:0;">
+								<span class="dashicons dashicons-database-view" aria-hidden="true"></span>
+								<?php esc_html_e( 'Database diagnostics', 'post-extractor' ); ?>
+							</h3>
+							<p class="pe-note" style="margin-top:0;">
+								<?php esc_html_e( 'Quick visibility into production storage tables used by monetization and analytics endpoints.', 'post-extractor' ); ?>
+							</p>
+							<table class="widefat striped" style="max-width:920px;">
+								<thead>
+									<tr>
+										<th><?php esc_html_e( 'Table', 'post-extractor' ); ?></th>
+										<th><?php esc_html_e( 'Rows', 'post-extractor' ); ?></th>
+										<th><?php esc_html_e( 'Last updated (UTC)', 'post-extractor' ); ?></th>
+									</tr>
+								</thead>
+								<tbody>
+									<?php foreach ( $db_stats as $row ) : ?>
+										<tr>
+											<td><code><?php echo esc_html( (string) $row['table'] ); ?></code></td>
+											<td><?php echo esc_html( (string) number_format_i18n( (int) $row['rows'] ) ); ?></td>
+											<td><?php echo esc_html( (string) $row['last_updated'] ); ?></td>
+										</tr>
+									<?php endforeach; ?>
+								</tbody>
+							</table>
+							<form method="post" style="margin-top:12px;">
+								<?php wp_nonce_field( self::NONCE_KEY ); ?>
+								<button type="submit" name="run_db_health_check" class="button button-secondary" value="1">
+									<?php esc_html_e( 'Run DB health check', 'post-extractor' ); ?>
+								</button>
+							</form>
+						</div>
+					<?php endif; ?>
 				</div>
 			</div>
 
@@ -289,6 +362,34 @@ class Post_Extractor_Settings {
 													: esc_html__( 'Minimum 6 characters.', 'post-extractor' );
 												?>
 											</p>
+										</td>
+									</tr>
+									<tr>
+										<th scope="row"><label for="pe_premium_verify_url"><?php esc_html_e( 'Premium verifier URL', 'post-extractor' ); ?></label></th>
+										<td>
+											<input type="url" id="pe_premium_verify_url" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[premium_verify_url]" value="<?php echo esc_attr( $premium_verify_url ); ?>" class="large-text code" autocomplete="off" placeholder="https://your-verifier.example.com/verify" />
+											<p class="description"><?php esc_html_e( 'Optional: external server endpoint that verifies App Store / Google Play purchases.', 'post-extractor' ); ?></p>
+										</td>
+									</tr>
+									<tr>
+										<th scope="row"><label for="pe_premium_verify_bearer"><?php esc_html_e( 'Premium verifier bearer token', 'post-extractor' ); ?></label></th>
+										<td>
+											<input type="password" id="pe_premium_verify_bearer" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[premium_verify_bearer]" value="<?php echo esc_attr( $premium_verify_bearer ); ?>" class="large-text code" autocomplete="off" />
+										</td>
+									</tr>
+									<tr>
+										<th scope="row"><label for="pe_premium_verify_timeout"><?php esc_html_e( 'Premium verifier timeout (seconds)', 'post-extractor' ); ?></label></th>
+										<td>
+											<input type="number" id="pe_premium_verify_timeout" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[premium_verify_timeout]" value="<?php echo esc_attr( (string) $premium_verify_timeout ); ?>" class="small-text" min="2" max="30" step="1" />
+										</td>
+									</tr>
+									<tr>
+										<th scope="row"><?php esc_html_e( 'Premium strict mode', 'post-extractor' ); ?></th>
+										<td>
+											<label>
+												<input type="checkbox" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[premium_verify_strict]" value="1" <?php checked( $premium_verify_strict ); ?> />
+												<?php esc_html_e( 'Fail closed when verifier is unavailable/invalid response.', 'post-extractor' ); ?>
+											</label>
 										</td>
 									</tr>
 								</table>
@@ -536,6 +637,158 @@ class Post_Extractor_Settings {
 
 		$resource = sanitize_key( (string) $parts[2] );
 		return $resource !== '' ? $resource : 'misc';
+	}
+
+	/**
+	 * @return array<int, array{table: string, rows: int, last_updated: string}>
+	 */
+	private function get_db_diagnostics_stats(): array {
+		if ( ! class_exists( 'Post_Extractor_DB' ) ) {
+			return [];
+		}
+		global $wpdb;
+
+		$defs = [
+			[
+				'name' => Post_Extractor_DB::table_entitlements(),
+				'updated_col' => 'updated_at',
+			],
+			[
+				'name' => Post_Extractor_DB::table_analytics_daily(),
+				'updated_col' => 'event_date',
+			],
+			[
+				'name' => Post_Extractor_DB::table_contributor_earnings(),
+				'updated_col' => 'credited_at',
+			],
+		];
+
+		$out = [];
+		foreach ( $defs as $d ) {
+			$table = (string) ( $d['name'] ?? '' );
+			$updated_col = (string) ( $d['updated_col'] ?? '' );
+			if ( $table === '' || $updated_col === '' ) {
+				continue;
+			}
+			$exists = (string) $wpdb->get_var(
+				$wpdb->prepare(
+					'SHOW TABLES LIKE %s',
+					$table
+				)
+			);
+			if ( $exists !== $table ) {
+				$out[] = [
+					'table' => $table,
+					'rows' => 0,
+					'last_updated' => __( 'not created', 'post-extractor' ),
+				];
+				continue;
+			}
+			$rows = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$table}" );
+			$last = (string) $wpdb->get_var( "SELECT MAX({$updated_col}) FROM {$table}" );
+			$out[] = [
+				'table' => $table,
+				'rows' => $rows,
+				'last_updated' => $last !== '' ? $last : __( 'n/a', 'post-extractor' ),
+			];
+		}
+		return $out;
+	}
+
+	/**
+	 * Validates required tables, columns, and key indexes for production storage.
+	 *
+	 * @return array{ok: bool, summary: string, details: array<int, string>}
+	 */
+	private function run_db_health_check(): array {
+		if ( ! class_exists( 'Post_Extractor_DB' ) ) {
+			return [
+				'ok' => false,
+				'summary' => __( 'DB class is missing.', 'post-extractor' ),
+				'details' => [ __( 'Post_Extractor_DB class was not found.', 'post-extractor' ) ],
+			];
+		}
+		global $wpdb;
+
+		$spec = [
+			Post_Extractor_DB::table_entitlements() => [
+				'columns' => [ 'device_id', 'active', 'updated_at', 'verified_mode' ],
+				'indexes' => [ 'device_id_unique', 'active_idx', 'updated_idx' ],
+			],
+			Post_Extractor_DB::table_analytics_daily() => [
+				'columns' => [ 'event_date', 'event_name', 'publication', 'format', 'event_count' ],
+				'indexes' => [ 'uniq_daily', 'event_idx', 'pub_idx', 'date_idx' ],
+			],
+			Post_Extractor_DB::table_contributor_earnings() => [
+				'columns' => [ 'application_id', 'amount', 'credited_at' ],
+				'indexes' => [ 'app_idx', 'credited_idx' ],
+			],
+		];
+
+		$details = [];
+		$errors = 0;
+		$warnings = 0;
+
+		foreach ( $spec as $table => $cfg ) {
+			$exists = (string) $wpdb->get_var(
+				$wpdb->prepare(
+					'SHOW TABLES LIKE %s',
+					$table
+				)
+			);
+			if ( $exists !== $table ) {
+				$errors++;
+				$details[] = sprintf( 'Missing table: %s', $table );
+				continue;
+			}
+			$details[] = sprintf( 'Table OK: %s', $table );
+
+			$cols = $wpdb->get_results( "SHOW COLUMNS FROM {$table}", ARRAY_A );
+			$col_map = [];
+			if ( is_array( $cols ) ) {
+				foreach ( $cols as $c ) {
+					if ( isset( $c['Field'] ) ) {
+						$col_map[ (string) $c['Field'] ] = true;
+					}
+				}
+			}
+			foreach ( (array) ( $cfg['columns'] ?? [] ) as $required_col ) {
+				$required_col = (string) $required_col;
+				if ( ! isset( $col_map[ $required_col ] ) ) {
+					$errors++;
+					$details[] = sprintf( 'Missing column %s in %s', $required_col, $table );
+				}
+			}
+
+			$idx_rows = $wpdb->get_results( "SHOW INDEX FROM {$table}", ARRAY_A );
+			$idx_map = [];
+			if ( is_array( $idx_rows ) ) {
+				foreach ( $idx_rows as $irow ) {
+					if ( isset( $irow['Key_name'] ) ) {
+						$idx_map[ (string) $irow['Key_name'] ] = true;
+					}
+				}
+			}
+			foreach ( (array) ( $cfg['indexes'] ?? [] ) as $required_idx ) {
+				$required_idx = (string) $required_idx;
+				if ( ! isset( $idx_map[ $required_idx ] ) ) {
+					$warnings++;
+					$details[] = sprintf( 'Missing index %s on %s', $required_idx, $table );
+				}
+			}
+		}
+
+		$ok = $errors === 0;
+		$summary = sprintf(
+			'errors=%d, warnings=%d',
+			(int) $errors,
+			(int) $warnings
+		);
+		return [
+			'ok' => $ok,
+			'summary' => $summary,
+			'details' => $details,
+		];
 	}
 }
 

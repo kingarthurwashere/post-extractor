@@ -191,6 +191,12 @@ class Post_Extractor_API {
             'permission_callback' => [ $this, 'check_permission' ],
         ] );
 
+        register_rest_route( self::NAMESPACE, '/health', [
+            'methods'             => WP_REST_Server::READABLE,
+            'callback'            => [ $this, 'get_health' ],
+            'permission_callback' => [ $this, 'check_permission' ],
+        ] );
+
         register_rest_route( self::NAMESPACE, '/submissions/(?P<id>\d+)', [
             'methods'             => WP_REST_Server::READABLE,
             'callback'            => [ $this, 'get_citizen_submission' ],
@@ -260,6 +266,8 @@ class Post_Extractor_API {
             'args'                => [
                 'page'     => [ 'default' => 1,   'sanitize_callback' => 'absint' ],
                 'per_page' => [ 'default' => 30,  'sanitize_callback' => 'absint' ],
+                'status'   => [ 'default' => 'all' ],
+                'q'        => [ 'default' => '', 'sanitize_callback' => 'sanitize_text_field' ],
             ],
         ] );
 
@@ -296,7 +304,67 @@ class Post_Extractor_API {
             'args'                => [
                 'page'     => [ 'default' => 1,  'sanitize_callback' => 'absint' ],
                 'per_page' => [ 'default' => 30, 'sanitize_callback' => 'absint' ],
+                'status'   => [ 'default' => 'all' ],
+                'q'        => [ 'default' => '', 'sanitize_callback' => 'sanitize_text_field' ],
             ],
+        ] );
+
+        register_rest_route( self::NAMESPACE, '/premium/entitlement', [
+            'methods'             => WP_REST_Server::READABLE,
+            'callback'            => [ $this, 'get_premium_entitlement' ],
+            'permission_callback' => [ $this, 'check_permission' ],
+            'args'                => [
+                'device_id' => [
+                    'required'          => true,
+                    'sanitize_callback' => 'sanitize_text_field',
+                ],
+            ],
+        ] );
+
+        register_rest_route( self::NAMESPACE, '/premium/entitlement/verify', [
+            'methods'             => WP_REST_Server::CREATABLE,
+            'callback'            => [ $this, 'post_premium_entitlement_verify' ],
+            'permission_callback' => [ $this, 'check_permission' ],
+        ] );
+
+        register_rest_route( self::NAMESPACE, '/ads/placements', [
+            'methods'             => WP_REST_Server::READABLE,
+            'callback'            => [ $this, 'get_ads_placements' ],
+            'permission_callback' => [ $this, 'check_permission' ],
+            'args'                => [
+                'publication' => [ 'default' => '' ],
+                'placement'   => [ 'default' => '' ],
+            ],
+        ] );
+
+        register_rest_route( self::NAMESPACE, '/analytics/events', [
+            'methods'             => WP_REST_Server::CREATABLE,
+            'callback'            => [ $this, 'post_analytics_event' ],
+            'permission_callback' => [ $this, 'check_permission' ],
+        ] );
+
+        register_rest_route( self::NAMESPACE, '/analytics/summary', [
+            'methods'             => WP_REST_Server::READABLE,
+            'callback'            => [ $this, 'get_analytics_summary' ],
+            'permission_callback' => [ $this, 'check_editorial' ],
+            'args'                => [
+                'days' => [ 'default' => 30, 'sanitize_callback' => 'absint' ],
+            ],
+        ] );
+
+        register_rest_route( self::NAMESPACE, '/contributors/earnings', [
+            'methods'             => WP_REST_Server::READABLE,
+            'callback'            => [ $this, 'get_contributor_earnings' ],
+            'permission_callback' => [ $this, 'check_permission' ],
+            'args'                => [
+                'application_id' => [ 'required' => true, 'sanitize_callback' => 'absint' ],
+            ],
+        ] );
+
+        register_rest_route( self::NAMESPACE, '/editorial/contributor-earnings/credit', [
+            'methods'             => WP_REST_Server::CREATABLE,
+            'callback'            => [ $this, 'post_editorial_contributor_earnings_credit' ],
+            'permission_callback' => [ $this, 'check_editorial' ],
         ] );
     }
 
@@ -621,6 +689,634 @@ class Post_Extractor_API {
         return $response;
     }
 
+    public function get_health( WP_REST_Request $request ): WP_REST_Response {
+        $opts = get_option( Post_Extractor_Settings::OPTION_KEY, [] );
+        $api_key = isset( $opts['api_key'] ) ? (string) $opts['api_key'] : '';
+        $editorial_user = isset( $opts['newsbepa_editorial_user'] ) ? (string) $opts['newsbepa_editorial_user'] : '';
+        $editorial_hash = isset( $opts['newsbepa_editorial_hash'] ) ? (string) $opts['newsbepa_editorial_hash'] : '';
+        $post_types = $this->get_extractable_post_type_slugs();
+        $now = gmdate( 'c' );
+
+        return rest_ensure_response( [
+            'ok'                    => true,
+            'namespace'             => self::NAMESPACE,
+            'plugin_version'        => defined( 'POST_EXTRACTOR_VERSION' ) ? POST_EXTRACTOR_VERSION : 'unknown',
+            'timestamp_utc'         => $now,
+            'site_name'             => (string) get_bloginfo( 'name', 'raw' ),
+            'site_url'              => (string) home_url( '/' ),
+            'api_key_configured'    => $api_key !== '',
+            'rate_limit_per_minute' => isset( $opts['rate_limit_per_minute'] ) ? (int) $opts['rate_limit_per_minute'] : 120,
+            'editorial_configured'  => ( $editorial_user !== '' && $editorial_hash !== '' ),
+            'extractable_types'     => $post_types,
+            'extractable_total'     => count( $post_types ),
+        ] );
+    }
+
+    // -------------------------------------------------------------------------
+    // Premium entitlement verification (Phase 2 scaffold)
+    // -------------------------------------------------------------------------
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function get_premium_entitlement_record( string $device_id ): ?array {
+        global $wpdb;
+        $table = Post_Extractor_DB::table_entitlements();
+        $row = $wpdb->get_row(
+            $wpdb->prepare(
+                "SELECT * FROM {$table} WHERE device_id = %s LIMIT 1",
+                $device_id
+            ),
+            ARRAY_A
+        );
+        return is_array( $row ) ? $row : null;
+    }
+
+    private function upsert_premium_entitlement_record(
+        string $device_id,
+        bool $active,
+        string $platform,
+        string $product_id,
+        string $purchase_id,
+        string $purchase_hash,
+        string $expires_at,
+        string $verified_mode
+    ): void {
+        global $wpdb;
+        $table = Post_Extractor_DB::table_entitlements();
+        $now = gmdate( 'Y-m-d H:i:s' );
+        $expires_sql = null;
+        if ( $expires_at !== '' ) {
+            $ts = strtotime( $expires_at );
+            if ( is_int( $ts ) && $ts > 0 ) {
+                $expires_sql = gmdate( 'Y-m-d H:i:s', $ts );
+            }
+        }
+
+        $sql = "INSERT INTO {$table}
+            (device_id, active, platform, product_id, purchase_id, purchase_hash, expires_at, updated_at, verified_mode)
+            VALUES (%s, %d, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                active = VALUES(active),
+                platform = VALUES(platform),
+                product_id = VALUES(product_id),
+                purchase_id = VALUES(purchase_id),
+                purchase_hash = VALUES(purchase_hash),
+                expires_at = VALUES(expires_at),
+                updated_at = VALUES(updated_at),
+                verified_mode = VALUES(verified_mode)";
+        $wpdb->query(
+            $wpdb->prepare(
+                $sql,
+                $device_id,
+                $active ? 1 : 0,
+                $platform,
+                $product_id,
+                $purchase_id,
+                $purchase_hash,
+                $expires_sql,
+                $now,
+                $verified_mode
+            )
+        );
+    }
+
+    private function sanitize_device_id( string $raw ): string {
+        $v = strtolower( trim( $raw ) );
+        $v = preg_replace( '/[^a-z0-9_\-]/', '', $v );
+        if ( ! is_string( $v ) ) {
+            return '';
+        }
+        if ( strlen( $v ) > 120 ) {
+            $v = (string) mb_substr( $v, 0, 120 );
+        }
+        return $v;
+    }
+
+    public function get_premium_entitlement( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+        $device_id = $this->sanitize_device_id( (string) $request->get_param( 'device_id' ) );
+        if ( $device_id === '' ) {
+            return new WP_Error(
+                'rest_invalid_param',
+                __( 'device_id is required.', 'post-extractor' ),
+                [ 'status' => 400 ]
+            );
+        }
+        $record = $this->get_premium_entitlement_record( $device_id );
+        if ( ! is_array( $record ) ) {
+            return rest_ensure_response( [
+                'device_id' => $device_id,
+                'active' => false,
+            ] );
+        }
+        $expires_raw = isset( $record['expires_at'] ) ? (string) $record['expires_at'] : '';
+        if ( $expires_raw !== '' && preg_match( '/^\d{4}-\d{2}-\d{2} /', $expires_raw ) ) {
+            $ts = strtotime( $expires_raw . ' UTC' );
+            if ( is_int( $ts ) ) {
+                $expires_raw = gmdate( 'c', $ts );
+            }
+        }
+        $active = ( (int) ( $record['active'] ?? 0 ) ) === 1;
+        if ( $active && $expires_raw !== '' ) {
+            $exp = strtotime( $expires_raw );
+            if ( is_int( $exp ) && $exp > 0 && $exp < time() ) {
+                $active = false;
+            }
+        }
+        return rest_ensure_response( [
+            'device_id'    => $device_id,
+            'active'       => $active,
+            'product_id'   => (string) ( $record['product_id'] ?? '' ),
+            'platform'     => (string) ( $record['platform'] ?? '' ),
+            'purchase_id'  => (string) ( $record['purchase_id'] ?? '' ),
+            'expires_at'   => $expires_raw,
+            'updated_at'   => (string) ( $record['updated_at'] ?? '' ),
+            'verified_mode'=> (string) ( $record['verified_mode'] ?? 'server_stub' ),
+        ] );
+    }
+
+    public function post_premium_entitlement_verify( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+        $body = $request->get_json_params();
+        if ( ! is_array( $body ) ) {
+            $body = [];
+        }
+
+        $device_id = $this->sanitize_device_id( (string) ( $body['device_id'] ?? '' ) );
+        if ( $device_id === '' ) {
+            return new WP_Error(
+                'rest_invalid_param',
+                __( 'device_id is required.', 'post-extractor' ),
+                [ 'status' => 400 ]
+            );
+        }
+        $platform = sanitize_key( (string) ( $body['platform'] ?? '' ) );
+        if ( ! in_array( $platform, [ 'android', 'ios' ], true ) ) {
+            return new WP_Error(
+                'rest_invalid_param',
+                __( 'platform must be android or ios.', 'post-extractor' ),
+                [ 'status' => 400 ]
+            );
+        }
+        $product_id = sanitize_text_field( (string) ( $body['product_id'] ?? '' ) );
+        if ( $product_id === '' ) {
+            return new WP_Error(
+                'rest_invalid_param',
+                __( 'product_id is required.', 'post-extractor' ),
+                [ 'status' => 400 ]
+            );
+        }
+        $purchase_id = sanitize_text_field( (string) ( $body['purchase_id'] ?? '' ) );
+        if ( $purchase_id === '' ) {
+            return new WP_Error(
+                'rest_invalid_param',
+                __( 'purchase_id is required.', 'post-extractor' ),
+                [ 'status' => 400 ]
+            );
+        }
+        $token = sanitize_text_field( (string) ( $body['purchase_token'] ?? '' ) );
+        if ( $token === '' ) {
+            return new WP_Error(
+                'rest_invalid_param',
+                __( 'purchase_token is required.', 'post-extractor' ),
+                [ 'status' => 400 ]
+            );
+        }
+        $expires_at = sanitize_text_field( (string) ( $body['expires_at'] ?? '' ) );
+        $now = gmdate( 'c' );
+        $verification = $this->verify_premium_purchase_with_provider(
+            $device_id,
+            $platform,
+            $product_id,
+            $purchase_id,
+            $token,
+            $expires_at
+        );
+        if ( is_wp_error( $verification ) ) {
+            return $verification;
+        }
+        $active = (bool) ( $verification['active'] ?? false );
+        $verified_mode = (string) ( $verification['verified_mode'] ?? 'server_stub' );
+        $resolved_expires_at = (string) ( $verification['expires_at'] ?? $expires_at );
+
+        $this->upsert_premium_entitlement_record(
+            $device_id,
+            $active,
+            $platform,
+            $product_id,
+            $purchase_id,
+            hash( 'sha256', $token ),
+            $resolved_expires_at,
+            $verified_mode
+        );
+
+        return rest_ensure_response( [
+            'ok'            => true,
+            'device_id'     => $device_id,
+            'active'        => $active,
+            'verified_mode' => $verified_mode,
+            'updated_at'    => $now,
+            'expires_at'    => $resolved_expires_at,
+        ] );
+    }
+
+    /**
+     * Verify purchase evidence against configured provider (recommended) or fallback.
+     *
+     * Expected provider JSON response:
+     * {
+     *   "ok": true,
+     *   "active": true,
+     *   "expires_at": "2026-12-31T23:59:59+00:00",
+     *   "verified_mode": "provider_google_apple"
+     * }
+     *
+     * @return array{active: bool, expires_at: string, verified_mode: string}|WP_Error
+     */
+    private function verify_premium_purchase_with_provider(
+        string $device_id,
+        string $platform,
+        string $product_id,
+        string $purchase_id,
+        string $purchase_token,
+        string $expires_at_hint
+    ): array|WP_Error {
+        $opts = get_option( Post_Extractor_Settings::OPTION_KEY, [] );
+        $provider_url = isset( $opts['premium_verify_url'] ) ? trim( (string) $opts['premium_verify_url'] ) : '';
+        $provider_bearer = isset( $opts['premium_verify_bearer'] ) ? (string) $opts['premium_verify_bearer'] : '';
+        $provider_timeout = isset( $opts['premium_verify_timeout'] ) ? (int) $opts['premium_verify_timeout'] : 8;
+        $strict = isset( $opts['premium_verify_strict'] ) && (int) $opts['premium_verify_strict'] === 1;
+
+        if ( $provider_timeout < 2 ) {
+            $provider_timeout = 2;
+        }
+        if ( $provider_timeout > 30 ) {
+            $provider_timeout = 30;
+        }
+
+        if ( $provider_url === '' ) {
+            if ( $strict ) {
+                return new WP_Error(
+                    'pe_premium_verify_unconfigured',
+                    __( 'Premium verifier is not configured (strict mode is enabled).', 'post-extractor' ),
+                    [ 'status' => 503 ]
+                );
+            }
+            $active = true;
+            if ( $expires_at_hint !== '' ) {
+                $exp = strtotime( $expires_at_hint );
+                if ( is_int( $exp ) && $exp > 0 && $exp < time() ) {
+                    $active = false;
+                }
+            }
+            return [
+                'active' => $active,
+                'expires_at' => $expires_at_hint,
+                'verified_mode' => 'server_stub',
+            ];
+        }
+
+        $headers = [
+            'Content-Type' => 'application/json',
+            'Accept'       => 'application/json',
+            'User-Agent'   => 'Post-Extractor/' . ( defined( 'POST_EXTRACTOR_VERSION' ) ? POST_EXTRACTOR_VERSION : 'unknown' ),
+        ];
+        if ( $provider_bearer !== '' ) {
+            $headers['Authorization'] = 'Bearer ' . $provider_bearer;
+        }
+
+        $payload = [
+            'device_id'      => $device_id,
+            'platform'       => $platform,
+            'product_id'     => $product_id,
+            'purchase_id'    => $purchase_id,
+            'purchase_token' => $purchase_token,
+            'expires_at_hint'=> $expires_at_hint,
+            'site_url'       => (string) home_url( '/' ),
+            'plugin_version' => defined( 'POST_EXTRACTOR_VERSION' ) ? POST_EXTRACTOR_VERSION : 'unknown',
+        ];
+
+        $resp = wp_remote_post(
+            $provider_url,
+            [
+                'timeout' => $provider_timeout,
+                'headers' => $headers,
+                'body'    => wp_json_encode( $payload ),
+            ]
+        );
+        if ( is_wp_error( $resp ) ) {
+            if ( $strict ) {
+                return new WP_Error(
+                    'pe_premium_verify_failed',
+                    __( 'Premium verification provider request failed.', 'post-extractor' ),
+                    [ 'status' => 502 ]
+                );
+            }
+            return [
+                'active' => true,
+                'expires_at' => $expires_at_hint,
+                'verified_mode' => 'server_stub_soft_fail',
+            ];
+        }
+
+        $http = (int) wp_remote_retrieve_response_code( $resp );
+        $raw = (string) wp_remote_retrieve_body( $resp );
+        $decoded = json_decode( $raw, true );
+        $is_ok = ( $http >= 200 && $http < 300 && is_array( $decoded ) );
+        if ( ! $is_ok ) {
+            if ( $strict ) {
+                return new WP_Error(
+                    'pe_premium_verify_failed',
+                    __( 'Premium verification provider returned a bad response.', 'post-extractor' ),
+                    [ 'status' => 502 ]
+                );
+            }
+            return [
+                'active' => true,
+                'expires_at' => $expires_at_hint,
+                'verified_mode' => 'server_stub_soft_fail',
+            ];
+        }
+
+        $active = isset( $decoded['active'] ) && $decoded['active'] === true;
+        $expires = isset( $decoded['expires_at'] ) ? sanitize_text_field( (string) $decoded['expires_at'] ) : $expires_at_hint;
+        $mode = isset( $decoded['verified_mode'] ) ? sanitize_key( (string) $decoded['verified_mode'] ) : 'provider';
+        if ( $mode === '' ) {
+            $mode = 'provider';
+        }
+
+        return [
+            'active' => $active,
+            'expires_at' => $expires,
+            'verified_mode' => $mode,
+        ];
+    }
+
+    // -------------------------------------------------------------------------
+    // Ads / monetization / analytics
+    // -------------------------------------------------------------------------
+
+    public function get_ads_placements( WP_REST_Request $request ): WP_REST_Response {
+        $publication = $this->map_publication_to_camel( (string) $request->get_param( 'publication' ) );
+        $placement = sanitize_key( (string) $request->get_param( 'placement' ) );
+        $items = $this->default_ad_placements_for( $publication );
+        if ( $placement !== '' ) {
+            $items = array_values(
+                array_filter(
+                    $items,
+                    static fn( $row ) => is_array( $row ) && ( $row['placement'] ?? '' ) === $placement
+                )
+            );
+        }
+        return rest_ensure_response(
+            [
+                'publication' => $publication,
+                'placements'  => $items,
+                'currency'    => 'USD',
+            ]
+        );
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function default_ad_placements_for( string $publication ): array {
+        $base = [
+            [
+                'placement'   => 'feed_inline_top',
+                'type'        => 'native',
+                'enabled'     => true,
+                'network'     => 'house',
+                'price_model' => 'cpm',
+                'price'       => 2.50,
+            ],
+            [
+                'placement'   => 'article_mid_content',
+                'type'        => 'banner',
+                'enabled'     => true,
+                'network'     => 'house',
+                'price_model' => 'cpm',
+                'price'       => 3.20,
+            ],
+            [
+                'placement'   => 'video_pre_roll',
+                'type'        => 'video',
+                'enabled'     => ( $publication === 'crossNetworkTV' ),
+                'network'     => 'house',
+                'price_model' => 'cpm',
+                'price'       => 4.75,
+            ],
+        ];
+        return $base;
+    }
+
+    /**
+     * Stores compact daily counters for product intelligence dashboard.
+     */
+    public function post_analytics_event( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+        $body = $request->get_json_params();
+        if ( ! is_array( $body ) ) {
+            $body = [];
+        }
+        $event = sanitize_key( (string) ( $body['event'] ?? '' ) );
+        if ( $event === '' ) {
+            return new WP_Error(
+                'rest_invalid_param',
+                __( 'event is required.', 'post-extractor' ),
+                [ 'status' => 400 ]
+            );
+        }
+        $publication = $this->map_publication_to_camel( (string) ( $body['publication'] ?? 'myAfrika' ) );
+        $format = sanitize_key( (string) ( $body['format'] ?? 'article' ) );
+        $day = gmdate( 'Y-m-d' );
+        $key = $day . '|' . $event . '|' . $publication . '|' . $format;
+
+        global $wpdb;
+        $table = Post_Extractor_DB::table_analytics_daily();
+        $wpdb->query(
+            $wpdb->prepare(
+                "INSERT INTO {$table}
+                (event_date, event_name, publication, format, event_count)
+                VALUES (%s, %s, %s, %s, 1)
+                ON DUPLICATE KEY UPDATE event_count = event_count + 1",
+                $day,
+                $event,
+                $publication,
+                $format
+            )
+        );
+        $count = (int) $wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT event_count FROM {$table}
+                 WHERE event_date=%s AND event_name=%s AND publication=%s AND format=%s
+                 LIMIT 1",
+                $day,
+                $event,
+                $publication,
+                $format
+            )
+        );
+        return rest_ensure_response(
+            [
+                'ok' => true,
+                'key' => $key,
+                'count' => (int) $store[ $key ],
+            ]
+        );
+    }
+
+    public function get_analytics_summary( WP_REST_Request $request ): WP_REST_Response {
+        $days = (int) $request->get_param( 'days' );
+        if ( $days < 1 ) {
+            $days = 30;
+        }
+        if ( $days > 365 ) {
+            $days = 365;
+        }
+        $cutoff = strtotime( gmdate( 'Y-m-d' ) . ' -' . ( $days - 1 ) . ' days' );
+        $cutoff_date = gmdate( 'Y-m-d', is_int( $cutoff ) ? $cutoff : time() );
+
+        $totals_by_event = [];
+        $totals_by_publication = [];
+        $totals_by_format = [];
+        $total = 0;
+        global $wpdb;
+        $table = Post_Extractor_DB::table_analytics_daily();
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT event_name, publication, format, SUM(event_count) AS n
+                 FROM {$table}
+                 WHERE event_date >= %s
+                 GROUP BY event_name, publication, format",
+                $cutoff_date
+            ),
+            ARRAY_A
+        );
+        if ( is_array( $rows ) ) {
+            foreach ( $rows as $row ) {
+                if ( ! is_array( $row ) ) {
+                    continue;
+                }
+                $event = sanitize_key( (string) ( $row['event_name'] ?? '' ) );
+                $publication = sanitize_key( (string) ( $row['publication'] ?? '' ) );
+                $format = sanitize_key( (string) ( $row['format'] ?? '' ) );
+                $n = (int) ( $row['n'] ?? 0 );
+                if ( $event === '' || $publication === '' || $format === '' || $n < 1 ) {
+                    continue;
+                }
+                $total += $n;
+                $totals_by_event[ $event ] = ( $totals_by_event[ $event ] ?? 0 ) + $n;
+                $totals_by_publication[ $publication ] = ( $totals_by_publication[ $publication ] ?? 0 ) + $n;
+                $totals_by_format[ $format ] = ( $totals_by_format[ $format ] ?? 0 ) + $n;
+            }
+        }
+
+        return rest_ensure_response(
+            [
+                'days'                  => $days,
+                'total_events'          => $total,
+                'by_event'              => $totals_by_event,
+                'by_publication'        => $totals_by_publication,
+                'by_format'             => $totals_by_format,
+                'generated_at_utc'      => gmdate( 'c' ),
+            ]
+        );
+    }
+
+    public function get_contributor_earnings( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+        $application_id = (int) $request->get_param( 'application_id' );
+        if ( $application_id < 1 ) {
+            return new WP_Error(
+                'rest_invalid_param',
+                __( 'application_id is required.', 'post-extractor' ),
+                [ 'status' => 400 ]
+            );
+        }
+        global $wpdb;
+        $table = Post_Extractor_DB::table_contributor_earnings();
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT amount, currency, note, story_id, credited_at
+                 FROM {$table}
+                 WHERE application_id = %d
+                 ORDER BY credited_at DESC, id DESC
+                 LIMIT 500",
+                $application_id
+            ),
+            ARRAY_A
+        );
+        if ( ! is_array( $rows ) ) {
+            $rows = [];
+        }
+        $total = 0.0;
+        foreach ( $rows as $row ) {
+            if ( ! is_array( $row ) ) {
+                continue;
+            }
+            $total += (float) ( $row['amount'] ?? 0.0 );
+        }
+        return rest_ensure_response(
+            [
+                'application_id' => $application_id,
+                'currency'       => 'USD',
+                'total_amount'   => round( $total, 2 ),
+                'entries'        => array_values( $rows ),
+            ]
+        );
+    }
+
+    public function post_editorial_contributor_earnings_credit( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+        $body = $request->get_json_params();
+        if ( ! is_array( $body ) ) {
+            $body = [];
+        }
+        $application_id = isset( $body['application_id'] ) ? (int) $body['application_id'] : 0;
+        $amount = isset( $body['amount'] ) ? (float) $body['amount'] : 0.0;
+        $note = sanitize_text_field( (string) ( $body['note'] ?? '' ) );
+        $story_id = isset( $body['story_id'] ) ? (int) $body['story_id'] : 0;
+        if ( $application_id < 1 ) {
+            return new WP_Error(
+                'rest_invalid_param',
+                __( 'application_id is required.', 'post-extractor' ),
+                [ 'status' => 400 ]
+            );
+        }
+        if ( $amount <= 0 ) {
+            return new WP_Error(
+                'rest_invalid_param',
+                __( 'amount must be greater than 0.', 'post-extractor' ),
+                [ 'status' => 400 ]
+            );
+        }
+
+        global $wpdb;
+        $table = Post_Extractor_DB::table_contributor_earnings();
+        $wpdb->insert(
+            $table,
+            [
+                'application_id' => $application_id,
+                'amount'         => round( $amount, 2 ),
+                'currency'       => 'USD',
+                'note'           => $note,
+                'story_id'       => $story_id > 0 ? $story_id : null,
+                'credited_at'    => gmdate( 'Y-m-d H:i:s' ),
+            ],
+            [ '%d', '%f', '%s', '%s', '%d', '%s' ]
+        );
+        $entries_count = (int) $wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT COUNT(*) FROM {$table} WHERE application_id = %d",
+                $application_id
+            )
+        );
+        return rest_ensure_response(
+            [
+                'ok' => true,
+                'application_id' => $application_id,
+                'entries_count' => $entries_count,
+            ]
+        );
+    }
+
     /**
      * @return array<string, mixed>
      */
@@ -722,10 +1418,13 @@ class Post_Extractor_API {
      *   _embedded['wp:term'][n][] → categories / tags
      */
     private function format_post( WP_Post $post ): array {
+        $premium = $this->build_premium_payload( $post );
         $rest_data = $this->get_core_rest_post_data( $post );
         if ( ! empty( $rest_data ) ) {
             $blocks = new Post_Extractor_Blocks();
             $rest_data['sections'] = $blocks->parse( $post->post_content );
+            $rest_data['is_premium'] = $premium['is_premium'];
+            $rest_data['preview_html'] = $premium['preview_html'];
             return $rest_data;
         }
 
@@ -810,6 +1509,37 @@ class Post_Extractor_API {
 
             // Plugin extras
             'sections' => $sections,
+            'is_premium' => $premium['is_premium'],
+            'preview_html' => $premium['preview_html'],
+        ];
+    }
+
+    /**
+     * Phase-1 paywall fields for Flutter.
+     * Set post meta:
+     * - _pe_is_premium = 1|true|yes|on
+     * - _pe_preview_html = optional html teaser (fallback to excerpt)
+     *
+     * @return array{is_premium: bool, preview_html: string}
+     */
+    private function build_premium_payload( WP_Post $post ): array {
+        $raw_flag = get_post_meta( $post->ID, '_pe_is_premium', true );
+        $flag = false;
+        if ( is_bool( $raw_flag ) ) {
+            $flag = $raw_flag;
+        } else {
+            $v = strtolower( trim( (string) $raw_flag ) );
+            $flag = in_array( $v, [ '1', 'true', 'yes', 'on' ], true );
+        }
+
+        $preview_html = (string) get_post_meta( $post->ID, '_pe_preview_html', true );
+        if ( $preview_html === '' && $flag ) {
+            $preview_html = (string) get_the_excerpt( $post );
+        }
+
+        return [
+            'is_premium'  => $flag,
+            'preview_html' => $preview_html,
         ];
     }
 
@@ -1783,6 +2513,8 @@ class Post_Extractor_API {
     public function get_editorial_contributor_list( WP_REST_Request $req ): WP_REST_Response {
         $page     = (int) $req->get_param( 'page' );
         $per_page = (int) $req->get_param( 'per_page' );
+        $status   = sanitize_key( (string) ( $req->get_param( 'status' ) ?? 'all' ) );
+        $q        = strtolower( trim( sanitize_text_field( (string) ( $req->get_param( 'q' ) ?? '' ) ) ) );
         $out      = $this->run_editorial_paginated_cpt(
             Post_Extractor_Contributor_App::POST_TYPE,
             function ( WP_Post $post ) {
@@ -1791,6 +2523,34 @@ class Post_Extractor_API {
             $page,
             $per_page
         );
+        $allowed_status = [ 'all', 'pending', 'approved', 'rejected' ];
+        if ( ! in_array( $status, $allowed_status, true ) ) {
+            $status = 'all';
+        }
+        if ( $status !== 'all' || $q !== '' ) {
+            $out['items'] = array_values(
+                array_filter(
+                    $out['items'],
+                    static function ( $row ) use ( $status, $q ) {
+                        if ( ! is_array( $row ) ) {
+                            return false;
+                        }
+                        $row_status = sanitize_key( (string) ( $row['status'] ?? '' ) );
+                        if ( $status !== 'all' && $row_status !== $status ) {
+                            return false;
+                        }
+                        if ( $q === '' ) {
+                            return true;
+                        }
+                        $name  = strtolower( (string) ( $row['name'] ?? '' ) );
+                        $email = strtolower( (string) ( $row['email'] ?? '' ) );
+                        $pub   = strtolower( (string) ( $row['publication'] ?? '' ) );
+                        return str_contains( $name, $q ) || str_contains( $email, $q ) || str_contains( $pub, $q );
+                    }
+                )
+            );
+            $out['filteredCount'] = count( $out['items'] );
+        }
         return rest_ensure_response( $out );
     }
 
@@ -1854,6 +2614,8 @@ class Post_Extractor_API {
     public function get_editorial_citizen_list( WP_REST_Request $req ): WP_REST_Response {
         $page     = (int) $req->get_param( 'page' );
         $per_page = (int) $req->get_param( 'per_page' );
+        $status   = sanitize_key( (string) ( $req->get_param( 'status' ) ?? 'all' ) );
+        $q        = strtolower( trim( sanitize_text_field( (string) ( $req->get_param( 'q' ) ?? '' ) ) ) );
         $out      = $this->run_editorial_paginated_cpt(
             Post_Extractor_Citizen::POST_TYPE,
             function ( WP_Post $post ) {
@@ -1862,6 +2624,34 @@ class Post_Extractor_API {
             $page,
             $per_page
         );
+        $allowed_status = [ 'all', 'pendingreview', 'verified', 'rejected' ];
+        if ( ! in_array( $status, $allowed_status, true ) ) {
+            $status = 'all';
+        }
+        if ( $status !== 'all' || $q !== '' ) {
+            $out['items'] = array_values(
+                array_filter(
+                    $out['items'],
+                    static function ( $row ) use ( $status, $q ) {
+                        if ( ! is_array( $row ) ) {
+                            return false;
+                        }
+                        $row_status = strtolower( sanitize_key( (string) ( $row['status'] ?? '' ) ) );
+                        if ( $status !== 'all' && $row_status !== $status ) {
+                            return false;
+                        }
+                        if ( $q === '' ) {
+                            return true;
+                        }
+                        $headline = strtolower( (string) ( $row['headline'] ?? '' ) );
+                        $loc      = strtolower( (string) ( $row['location'] ?? '' ) );
+                        $pub      = strtolower( (string) ( $row['publication'] ?? '' ) );
+                        return str_contains( $headline, $q ) || str_contains( $loc, $q ) || str_contains( $pub, $q );
+                    }
+                )
+            );
+            $out['filteredCount'] = count( $out['items'] );
+        }
         return rest_ensure_response( $out );
     }
 

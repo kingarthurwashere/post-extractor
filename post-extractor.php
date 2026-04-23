@@ -24,6 +24,7 @@ require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-citizen.php';
 require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-contributor-app.php';
 require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-contributor-moderation.php';
 require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-contributor-app-admin.php';
+require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-db.php';
 require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-api.php';
 require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-blocks.php';
 require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-meta.php';
@@ -33,10 +34,19 @@ require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-settings.php';
  * Bootstrap the plugin.
  */
 function post_extractor_init(): void {
+    Post_Extractor_DB::maybe_install();
     $api = new Post_Extractor_API();
     $api->register_routes();
 }
 add_action( 'rest_api_init', 'post_extractor_init' );
+
+register_activation_hook(
+    __FILE__,
+    static function (): void {
+        Post_Extractor_DB::install();
+        update_option( Post_Extractor_DB::OPTION_SCHEMA_VERSION, Post_Extractor_DB::SCHEMA_VERSION, false );
+    }
+);
 
 // Bust /site-identity cache when Site Icon, URL, or Customizer (e.g. logo) changes.
 add_action(
