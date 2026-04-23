@@ -263,6 +263,32 @@ class Post_Extractor_API {
             ],
         ] );
 
+        register_rest_route( self::NAMESPACE, '/editorial/contributor-applications/(?P<id>\d+)/approve', [
+            'methods'             => WP_REST_Server::CREATABLE,
+            'callback'            => [ $this, 'post_editorial_contributor_approve' ],
+            'permission_callback' => [ $this, 'check_editorial' ],
+            'args'                => [
+                'id' => [
+                    'required'          => true,
+                    'validate_callback' => fn( $v ) => is_numeric( $v ) && (int) $v > 0,
+                    'sanitize_callback' => 'absint',
+                ],
+            ],
+        ] );
+
+        register_rest_route( self::NAMESPACE, '/editorial/contributor-applications/(?P<id>\d+)/reject', [
+            'methods'             => WP_REST_Server::CREATABLE,
+            'callback'            => [ $this, 'post_editorial_contributor_reject' ],
+            'permission_callback' => [ $this, 'check_editorial' ],
+            'args'                => [
+                'id' => [
+                    'required'          => true,
+                    'validate_callback' => fn( $v ) => is_numeric( $v ) && (int) $v > 0,
+                    'sanitize_callback' => 'absint',
+                ],
+            ],
+        ] );
+
         register_rest_route( self::NAMESPACE, '/editorial/citizen-submissions', [
             'methods'             => WP_REST_Server::READABLE,
             'callback'            => [ $this, 'get_editorial_citizen_list' ],
@@ -1335,33 +1361,7 @@ class Post_Extractor_API {
      * @return 'pending'|'approved'|'rejected'
      */
     private function map_contributor_application_status( WP_Post $post ): string {
-        if ( $post->post_type !== Post_Extractor_Contributor_App::POST_TYPE ) {
-            return 'rejected';
-        }
-        $raw = (string) get_post_meta( $post->ID, Post_Extractor_Contributor_App::META_MODERATION, true );
-        if ( in_array( $raw, [ 'rejected', 'denied' ], true ) ) {
-            return 'rejected';
-        }
-        if ( in_array( $raw, [ 'approved' ], true ) ) {
-            return 'approved';
-        }
-        if ( in_array( $raw, [ 'pending' ], true ) ) {
-            return 'pending';
-        }
-        $st = $post->post_status;
-        if ( 'pending' === $st ) {
-            return 'pending';
-        }
-        if ( in_array( $st, [ 'publish', 'private', 'future' ], true ) ) {
-            return 'approved';
-        }
-        if ( in_array( $st, [ 'trash' ], true ) ) {
-            return 'rejected';
-        }
-        if ( in_array( $st, [ 'draft' ], true ) ) {
-            return 'rejected';
-        }
-        return 'pending';
+        return Post_Extractor_Contributor_Moderation::map_status( $post );
     }
 
     private function build_contributor_application_array( WP_Post $post ): array|WP_Error {
@@ -1399,22 +1399,26 @@ class Post_Extractor_API {
             $created = gmdate( 'c' );
         }
         $status  = $this->map_contributor_application_status( $post );
-        $src     = (string) get_post_meta( $post->ID, Post_Extractor_Contributor_App::META_SOURCE, true );
-        $list    = [
-            'id'               => (int) $post->ID,
-            'name'             => $name,
-            'firstName'        => $first,
-            'surname'          => $last,
-            'email'            => $email,
-            'phone'            => $phone,
-            'location'         => $loc,
-            'reason'           => $reason,
-            'publication'      => $pub,
-            'publications'     => $pubs,
-            'allPublications'  => $all_s,
-            'status'           => $status,
-            'submittedAt'      => $created,
-            'source'           => $src !== '' ? $src : 'newsbepa',
+        $src   = (string) get_post_meta( $post->ID, Post_Extractor_Contributor_App::META_SOURCE, true );
+        $rej   = (string) get_post_meta( $post->ID, Post_Extractor_Contributor_Moderation::META_REJECTION_REASON, true );
+        $wpuid = (int) get_post_meta( $post->ID, Post_Extractor_Contributor_Moderation::META_LINKED_USER_ID, true );
+        $list  = [
+            'id'                 => (int) $post->ID,
+            'name'               => $name,
+            'firstName'          => $first,
+            'surname'            => $last,
+            'email'              => $email,
+            'phone'              => $phone,
+            'location'           => $loc,
+            'reason'             => $reason,
+            'publication'        => $pub,
+            'publications'       => $pubs,
+            'allPublications'    => $all_s,
+            'status'             => $status,
+            'submittedAt'        => $created,
+            'source'             => $src !== '' ? $src : 'newsbepa',
+            'rejectionReason'   => ( $status === 'rejected' && $rej !== '' ) ? $rej : null,
+            'wordpressUserId'  => ( $status === 'approved' && $wpuid > 0 ) ? $wpuid : null,
         ];
         return $list;
     }
@@ -1780,6 +1784,63 @@ class Post_Extractor_API {
             $per_page
         );
         return rest_ensure_response( $out );
+    }
+
+    public function post_editorial_contributor_approve( WP_REST_Request $req ): WP_REST_Response|WP_Error {
+        $id = (int) $req->get_param( 'id' );
+        $ok = Post_Extractor_Contributor_Moderation::approve( $id, 'rest' );
+        if ( is_wp_error( $ok ) ) {
+            return $this->contributor_moderation_to_rest_error( $ok );
+        }
+        $post = get_post( $id );
+        if ( ! $post || $post->post_type !== Post_Extractor_Contributor_App::POST_TYPE ) {
+            return new WP_Error( 'rest_not_found', __( 'Application not found.', 'post-extractor' ), [ 'status' => 404 ] );
+        }
+        $data = $this->build_contributor_application_array( $post );
+        if ( is_wp_error( $data ) ) {
+            return $data;
+        }
+        return rest_ensure_response( $data );
+    }
+
+    public function post_editorial_contributor_reject( WP_REST_Request $req ): WP_REST_Response|WP_Error {
+        $id     = (int) $req->get_param( 'id' );
+        $body   = $req->get_json_params();
+        $reason = '';
+        if ( is_array( $body ) && array_key_exists( 'reason', $body ) && $body['reason'] !== null ) {
+            $reason = (string) $body['reason'];
+        } else {
+            $p = $req->get_param( 'reason' );
+            if ( $p !== null && $p !== '' ) {
+                $reason = (string) $p;
+            }
+        }
+        $ok = Post_Extractor_Contributor_Moderation::reject( $id, $reason, 'rest' );
+        if ( is_wp_error( $ok ) ) {
+            return $this->contributor_moderation_to_rest_error( $ok );
+        }
+        $post = get_post( $id );
+        if ( ! $post || $post->post_type !== Post_Extractor_Contributor_App::POST_TYPE ) {
+            return new WP_Error( 'rest_not_found', __( 'Application not found.', 'post-extractor' ), [ 'status' => 404 ] );
+        }
+        $data = $this->build_contributor_application_array( $post );
+        if ( is_wp_error( $data ) ) {
+            return $data;
+        }
+        return rest_ensure_response( $data );
+    }
+
+    private function contributor_moderation_to_rest_error( WP_Error $e ): WP_Error {
+        $code   = $e->get_error_code();
+        $status = 400;
+        if ( in_array( $code, [ 'pe_not_found' ], true ) ) {
+            $status = 404;
+        } elseif ( 'pe_inactive' === $code ) {
+            $status = 410;
+        } elseif ( 'pe_reject_reason' === $code || 'pe_already_approved' === $code || 'pe_already_rejected' === $code || 'pe_app_bad_email' === $code ) {
+            $status = 400;
+        }
+        return new WP_Error( $code, $e->get_error_message(), [ 'status' => $status ] );
     }
 
     public function get_editorial_citizen_list( WP_REST_Request $req ): WP_REST_Response {

@@ -3,7 +3,7 @@
  * Plugin Name: Post Extractor API
  * Plugin URI:  https://arthurnyasango.vercel.app/
  * Description: Extracts all post types with sections, custom fields, featured images, taxonomies, and Gutenberg blocks via REST API.
- * Version:     1.5.1
+ * Version:     1.5.2
  * Author:      Kingarthurwashere
  * License:     GPL-2.0+
  * Text Domain: post-extractor
@@ -16,12 +16,14 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'POST_EXTRACTOR_VERSION', '1.5.1' );
+define( 'POST_EXTRACTOR_VERSION', '1.5.2' );
 define( 'POST_EXTRACTOR_DIR', plugin_dir_path( __FILE__ ) );
 define( 'POST_EXTRACTOR_URL', plugin_dir_url( __FILE__ ) );
 
 require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-citizen.php';
 require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-contributor-app.php';
+require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-contributor-moderation.php';
+require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-contributor-app-admin.php';
 require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-api.php';
 require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-blocks.php';
 require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-meta.php';

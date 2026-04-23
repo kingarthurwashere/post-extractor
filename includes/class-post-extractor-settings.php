@@ -411,6 +411,14 @@ class Post_Extractor_Settings {
 								<td><code>…/editorial/contributor-applications</code> — <?php esc_html_e( 'Paginated pe_contrib_app for mobile screening.', 'post-extractor' ); ?></td>
 							</tr>
 							<tr>
+								<td><span class="pe-badge pe-badge--post">POST</span></td>
+								<td><code>…/editorial/contributor-applications/{id}/approve</code> — <?php esc_html_e( 'Approve: creates WordPress contributor user, emails one-time password or existing account notice.', 'post-extractor' ); ?></td>
+							</tr>
+							<tr>
+								<td><span class="pe-badge pe-badge--post">POST</span></td>
+								<td><code>…/editorial/contributor-applications/{id}/reject</code> + JSON <code>reason</code> — <?php esc_html_e( 'Reject and email the applicant with your message (min. 3 characters).', 'post-extractor' ); ?></td>
+							</tr>
+							<tr>
 								<td><span class="pe-badge pe-badge--get">GET</span></td>
 								<td><code>…/editorial/citizen-submissions</code> — <?php esc_html_e( 'Paginated pe_citizen for mobile screening.', 'post-extractor' ); ?></td>
 							</tr>
