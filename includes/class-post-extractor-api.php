@@ -524,8 +524,16 @@ class Post_Extractor_API {
         return rest_ensure_response( $this->discover_cpt_slugs() );
     }
 
-    public function get_cpt_items( WP_REST_Request $request ): WP_REST_Response {
-        $slug = $request->get_param( 'slug' );
+    public function get_cpt_items( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+        $raw = $request->get_param( 'slug' );
+        $slug = is_string( $raw ) ? sanitize_key( $raw ) : '';
+        if ( $slug === '' ) {
+            return new WP_Error(
+                'rest_invalid_param',
+                __( 'A valid post type slug is required.', 'post-extractor' ),
+                [ 'status' => 400 ]
+            );
+        }
         [ $per_page, $page ] = $this->normalize_pagination( $request, 20 );
         $status = $this->parse_post_status_param( $request->get_param( 'status' ) );
 

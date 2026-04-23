@@ -13,7 +13,14 @@ class Post_Extractor_Contributor_App_Admin {
 
 	public const NONCE = 'pe_contrib_moderation';
 
+	/** @var bool */
+	private static $hooks_registered = false;
+
 	public static function init(): void {
+		if ( self::$hooks_registered ) {
+			return;
+		}
+		self::$hooks_registered = true;
 		add_action( 'add_meta_boxes', [ self::class, 'add_box' ] );
 		add_action( 'save_post_' . Post_Extractor_Contributor_App::POST_TYPE, [ self::class, 'save' ], 10, 2 );
 	}
@@ -147,9 +154,13 @@ class Post_Extractor_Contributor_App_Admin {
 		if ( is_wp_error( $ok ) ) {
 			add_filter(
 				'redirect_post_location',
-				static function ( string $url ) use ( $ok ) {
-					$url = add_query_arg( 'pe_contrib_err', rawurlencode( (string) $ok->get_error_code() . ':' . (string) $ok->get_error_message() ), $url );
-					return $url;
+				static function ( $url ) use ( $ok ) {
+					$base = is_string( $url ) ? $url : '';
+					return add_query_arg(
+						'pe_contrib_err',
+						rawurlencode( (string) $ok->get_error_code() . ':' . (string) $ok->get_error_message() ),
+						$base
+					);
 				}
 			);
 			return;

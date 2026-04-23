@@ -468,8 +468,11 @@ class Post_Extractor_Settings {
 	 * @return array<string, array<int, array{methods: string, url: string}>>
 	 */
 	private function discover_wp_core_endpoint_groups(): array {
+		if ( ! function_exists( 'rest_get_server' ) ) {
+			return [];
+		}
 		$server = rest_get_server();
-		if ( ! $server ) {
+		if ( ! is_object( $server ) || ! method_exists( $server, 'get_routes' ) ) {
 			return [];
 		}
 

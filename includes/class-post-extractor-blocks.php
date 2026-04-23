@@ -89,11 +89,16 @@ class Post_Extractor_Blocks {
      */
     private function render_block( array $block ): string {
         if ( function_exists( 'render_block' ) ) {
-            return trim( render_block( $block ) );
+            try {
+                return trim( (string) render_block( $block ) );
+            } catch ( \Throwable $e ) {
+                // Broken block render callbacks (third-party blocks) must not take down REST/API responses.
+                return trim( (string) ( $block['innerHTML'] ?? '' ) );
+            }
         }
 
         // Pre-5.5 fallback.
-        return trim( $block['innerHTML'] ?? '' );
+        return trim( (string) ( $block['innerHTML'] ?? '' ) );
     }
 
     /**
