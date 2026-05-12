@@ -31,9 +31,6 @@ require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-api.php';
 require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-blocks.php';
 require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-meta.php';
 require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-settings.php';
-require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-blocks.php';
-require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-meta.php';
-require_once POST_EXTRACTOR_DIR . 'includes/class-post-extractor-settings.php';
 
 /**
  * Bootstrap the plugin.

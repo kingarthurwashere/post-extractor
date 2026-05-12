@@ -316,4 +316,37 @@ class Post_Extractor_Contributor_Applications {
 		}
 		return [ 'rows' => $rows, 'total' => $total ];
 	}
+
+	/**
+	 * Permanently remove an application row. Clears matching contributor user meta and earnings rows for this id.
+	 * Does not delete WordPress user accounts.
+	 *
+	 * @return bool|WP_Error
+	 */
+	public static function delete_by_id( int $id ): bool|WP_Error {
+		$row = self::get( $id );
+		if ( $row === null ) {
+			return new WP_Error( 'pe_not_found', __( 'Application not found.', 'post-extractor' ) );
+		}
+		$st = self::map_status_from_row( $row );
+		global $wpdb;
+		$uid = (int) ( $row['wp_user_id'] ?? 0 );
+		if ( $uid > 0 ) {
+			$linked = get_user_meta( $uid, 'pe_contributor_app_id', true );
+			if ( (string) (int) $linked === (string) $id ) {
+				delete_user_meta( $uid, 'pe_contributor_app_id' );
+			}
+		}
+		if ( class_exists( 'Post_Extractor_DB' ) ) {
+			$earnings = Post_Extractor_DB::table_contributor_earnings();
+			$wpdb->delete( $earnings, [ 'application_id' => $id ], [ '%d' ] );
+		}
+		$t  = Post_Extractor_DB::table_contributor_applications();
+		$ok = $wpdb->delete( $t, [ 'id' => $id ], [ '%d' ] );
+		if ( ! $ok ) {
+			return new WP_Error( 'pe_contrib_delete_failed', __( 'Could not delete the application.', 'post-extractor' ) );
+		}
+		do_action( 'post_extractor_contributor_application_deleted', $id, $st );
+		return true;
+	}
 }

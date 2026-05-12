@@ -1,6 +1,6 @@
 <?php
 /**
- * wp-admin: contributor applications preview (custom table — not the post editor).
+ * wp-admin: contributor applications — list, filters, approve/reject/delete (aligned with citizen submissions UX).
  *
  * @package post-extractor
  */
@@ -21,30 +21,150 @@ class Post_Extractor_Contributor_App_Admin {
 		return max( 60, min( 86400, $raw ) );
 	}
 
+	/**
+	 * Same editorial access as viewing citizen submissions list.
+	 */
+	private static function user_can_moderate(): bool {
+		return current_user_can( 'edit_posts' );
+	}
+
+	private static function user_can_delete_row( array $row ): bool {
+		$st = Post_Extractor_Contributor_Applications::map_status_from_row( $row );
+		if ( $st === 'approved' ) {
+			return current_user_can( 'manage_options' );
+		}
+		return current_user_can( 'delete_posts' );
+	}
+
+	/**
+	 * @return array<string, string>
+	 */
+	private static function list_query_args_from_get(): array {
+		$out = [];
+		if ( isset( $_GET['pe_contrib_status'] ) && is_string( $_GET['pe_contrib_status'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification
+			$st = sanitize_key( wp_unslash( $_GET['pe_contrib_status'] ) );
+			if ( in_array( $st, [ 'pending', 'approved', 'rejected' ], true ) ) {
+				$out['pe_contrib_status'] = $st;
+			}
+		}
+		if ( isset( $_GET['pe_contrib_q'] ) && is_string( $_GET['pe_contrib_q'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification
+			$q = sanitize_text_field( wp_unslash( $_GET['pe_contrib_q'] ) );
+			if ( $q !== '' ) {
+				$out['pe_contrib_q'] = $q;
+			}
+		}
+		if ( isset( $_GET['paged'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification
+			$pg = absint( (string) $_GET['paged'] );
+			if ( $pg > 1 ) {
+				$out['paged'] = (string) $pg;
+			}
+		}
+		return $out;
+	}
+
+	public static function url_list( array $extra = [] ): string {
+		$base = array_merge( [ 'page' => self::PAGE_SLUG ], $extra );
+		return (string) admin_url( add_query_arg( $base, 'admin.php' ) );
+	}
+
+	/**
+	 * @param array<string, string> $preserve pe_contrib_status, pe_contrib_q from list filters.
+	 */
+	public static function url_detail( int $id, array $preserve = [] ): string {
+		$args = array_merge( [ 'page' => self::PAGE_SLUG, 'app_id' => $id ], $preserve );
+		return (string) admin_url( add_query_arg( $args, 'admin.php' ) );
+	}
+
 	public static function add_menu(): void {
-		// Must use options-general.php: add_options_page() registers under Settings with that
-		// parent only — post-extractor-settings is a child slug, not a valid add_submenu_page parent.
 		add_submenu_page(
-			'options-general.php',
+			'edit.php?post_type=' . Post_Extractor_Citizen::POST_TYPE,
 			__( 'Contributor applications', 'post-extractor' ),
 			__( 'Contributor applications', 'post-extractor' ),
-			'manage_options',
+			'edit_posts',
 			self::PAGE_SLUG,
 			[ self::class, 'render_page' ]
 		);
 	}
 
-	public static function url_list(): string {
-		return (string) admin_url( 'admin.php?page=' . self::PAGE_SLUG );
+	/**
+	 * GET row actions (same pattern as citizen submission row links).
+	 */
+	public static function handle_row_actions(): void {
+		if ( ! is_admin() || ! self::user_can_moderate() ) {
+			return;
+		}
+		if ( ! isset( $_GET['page'], $_GET['pe_contrib_row_action'], $_GET['app_id'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification
+			return;
+		}
+		if ( (string) $_GET['page'] !== self::PAGE_SLUG ) { // phpcs:ignore WordPress.Security.NonceVerification
+			return;
+		}
+		$action = sanitize_key( (string) wp_unslash( (string) $_GET['pe_contrib_row_action'] ) ); // phpcs:ignore WordPress.Security.NonceVerification
+		$id     = absint( (string) $_GET['app_id'] ); // phpcs:ignore WordPress.Security.NonceVerification
+		if ( $id < 1 || ! in_array( $action, [ 'approve', 'reject', 'delete' ], true ) ) {
+			return;
+		}
+		check_admin_referer( self::NONCE . '_row_' . $id );
+
+		$preserve = self::list_query_args_from_get();
+		$back     = self::url_list( $preserve );
+
+		$row = Post_Extractor_Contributor_Applications::get( $id );
+		if ( $row === null ) {
+			self::redirect_list_msg( $preserve, 'error', __( 'Application not found.', 'post-extractor' ) );
+		}
+		$st = Post_Extractor_Contributor_Applications::map_status_from_row( $row );
+
+		if ( $action === 'delete' ) {
+			if ( ! self::user_can_delete_row( $row ) ) {
+				self::redirect_list_msg( $preserve, 'error', __( 'You are not allowed to delete this application.', 'post-extractor' ) );
+			}
+			$del = Post_Extractor_Contributor_Applications::delete_by_id( $id );
+			if ( is_wp_error( $del ) ) {
+				self::redirect_list_msg( $preserve, 'error', $del->get_error_message() );
+			}
+			self::redirect_list_msg( $preserve, 'success', __( 'Application deleted.', 'post-extractor' ) );
+		}
+
+		if ( $st !== 'pending' ) {
+			self::redirect_list_msg( $preserve, 'error', __( 'Only pending applications can be approved or rejected from the list.', 'post-extractor' ) );
+		}
+
+		if ( $action === 'approve' ) {
+			$ok = Post_Extractor_Contributor_Moderation::approve( $id, 'admin_row' );
+			if ( is_wp_error( $ok ) ) {
+				self::redirect_list_msg( $preserve, 'error', $ok->get_error_message() );
+			}
+			self::redirect_list_msg( $preserve, 'success', __( 'Application approved.', 'post-extractor' ) );
+		}
+
+		$default_reason = __( 'Rejected from the applications list.', 'post-extractor' );
+		$ok             = Post_Extractor_Contributor_Moderation::reject( $id, $default_reason, 'admin_row' );
+		if ( is_wp_error( $ok ) ) {
+			self::redirect_list_msg( $preserve, 'error', $ok->get_error_message() );
+		}
+		self::redirect_list_msg( $preserve, 'success', __( 'Application rejected.', 'post-extractor' ) );
 	}
 
-	public static function url_detail( int $id ): string {
-		return (string) admin_url( 'admin.php?page=' . self::PAGE_SLUG . '&app_id=' . (int) $id );
+	/**
+	 * @param array<string, string> $preserve
+	 */
+	private static function redirect_list_msg( array $preserve, string $type, string $message ): void {
+		$args = array_merge(
+			$preserve,
+			[
+				'page'               => self::PAGE_SLUG,
+				'pe_contrib_msg'     => $message,
+				'pe_contrib_msg_typ' => $type,
+			]
+		);
+		wp_safe_redirect( (string) admin_url( add_query_arg( $args, 'admin.php' ) ) );
+		exit;
 	}
 
 	public static function render_page(): void {
-		if ( ! current_user_can( 'manage_options' ) ) {
-			return;
+		if ( ! self::user_can_moderate() ) {
+			wp_die( esc_html__( 'You do not have permission to access this page.', 'post-extractor' ), '', [ 'response' => 403 ] );
 		}
 		if ( isset( $_POST['pe_contrib_action'], $_POST['pe_contrib_moderation_nonce'], $_POST['pe_contrib_app_id'] ) && is_string( $_POST['pe_contrib_action'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification
 			if ( wp_verify_nonce( sanitize_text_field( wp_unslash( (string) $_POST['pe_contrib_moderation_nonce'] ) ), self::NONCE ) ) { // phpcs:ignore WordPress.Security.NonceVerification
@@ -62,17 +182,19 @@ class Post_Extractor_Contributor_App_Admin {
 							}
 							$ok = Post_Extractor_Contributor_Moderation::reject( $id, $raw, 'admin' );
 						}
+						$preserve = self::list_query_args_from_get();
 						if ( is_wp_error( $ok ) ) {
 							wp_safe_redirect(
 								add_query_arg(
-									'pe_contrib_err',
-									rawurlencode( (string) $ok->get_error_code() . ':' . (string) $ok->get_error_message() ),
-									self::url_list()
+									[
+										'pe_contrib_err' => rawurlencode( (string) $ok->get_error_code() . ':' . (string) $ok->get_error_message() ),
+									] + array_merge( [ 'page' => self::PAGE_SLUG ], $preserve ),
+									admin_url( 'admin.php' )
 								)
 							);
 							exit;
 						}
-						wp_safe_redirect( self::url_detail( $id ) );
+						wp_safe_redirect( self::url_detail( $id, $preserve ) );
 						exit;
 					}
 				}
@@ -88,19 +210,69 @@ class Post_Extractor_Contributor_App_Admin {
 	}
 
 	private static function render_list(): void {
-		$paged = isset( $_GET['paged'] ) ? max( 1, absint( (string) $_GET['paged'] ) ) : 1; // phpcs:ignore WordPress.Security.NonceVerification
+		$paged  = isset( $_GET['paged'] ) ? max( 1, absint( (string) $_GET['paged'] ) ) : 1; // phpcs:ignore WordPress.Security.NonceVerification
+		$status = 'all';
+		if ( isset( $_GET['pe_contrib_status'] ) && is_string( $_GET['pe_contrib_status'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification
+			$s = sanitize_key( wp_unslash( $_GET['pe_contrib_status'] ) );
+			if ( in_array( $s, [ 'all', 'pending', 'approved', 'rejected' ], true ) ) {
+				$status = $s;
+			}
+		}
+		$q = '';
+		if ( isset( $_GET['pe_contrib_q'] ) && is_string( $_GET['pe_contrib_q'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification
+			$q = strtolower( trim( sanitize_text_field( wp_unslash( $_GET['pe_contrib_q'] ) ) ) );
+		}
+
+		$preserve = self::list_query_args_from_get();
+		if ( $status !== 'all' ) {
+			$preserve['pe_contrib_status'] = $status;
+		}
+		if ( $q !== '' ) {
+			$preserve['pe_contrib_q'] = $q;
+		}
+		if ( $paged > 1 ) {
+			$preserve['paged'] = (string) $paged;
+		}
+
 		$undo  = self::cancel_undo_window_seconds();
-		$res  = Post_Extractor_Contributor_Applications::list_filtered( $paged, 25, 'all', '' );
-		$rows = $res['rows'];
+		$res   = Post_Extractor_Contributor_Applications::list_filtered( $paged, 25, $status, $q );
+		$rows  = $res['rows'];
 		$total = (int) $res['total'];
 		$pages = (int) max( 1, (int) ceil( $total / 25 ) );
 
+		$citizen_url = admin_url( 'edit.php?post_type=' . Post_Extractor_Citizen::POST_TYPE );
+
 		echo '<div class="wrap">';
-		echo '<h1>' . esc_html__( 'Contributor applications', 'post-extractor' ) . '</h1>';
-		echo '<p class="description">' . esc_html__( 'Applications from the mobile app are stored here (not as WordPress posts). Citizen story submissions remain under their own post type.', 'post-extractor' ) . '</p>';
+		echo '<h1 class="wp-heading-inline">' . esc_html__( 'Contributor applications', 'post-extractor' ) . '</h1>';
+		echo ' <a href="' . esc_url( $citizen_url ) . '" class="page-title-action">' . esc_html__( 'Citizen Submissions', 'post-extractor' ) . '</a>';
+		echo '<hr class="wp-header-end" />';
+
+		echo '<p class="description">' . esc_html__( 'Same workflow as citizen stories: filter the list, open details for context, or use Accept / Reject on each row. Delete removes the row permanently (earnings lines for this application id are cleared).', 'post-extractor' ) . '</p>';
+
+		echo '<form method="get" class="pe-contrib-filters" style="margin:12px 0;display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;">';
+		echo '<input type="hidden" name="page" value="' . esc_attr( self::PAGE_SLUG ) . '" />';
+		echo '<label><span class="screen-reader-text">' . esc_html__( 'Status', 'post-extractor' ) . '</span>';
+		echo '<select name="pe_contrib_status">';
+		foreach (
+			[
+				'all'       => __( 'All statuses', 'post-extractor' ),
+				'pending'   => __( 'Pending', 'post-extractor' ),
+				'approved'  => __( 'Approved', 'post-extractor' ),
+				'rejected'  => __( 'Rejected', 'post-extractor' ),
+			] as $val => $lab
+		) {
+			echo '<option value="' . esc_attr( $val ) . '"' . selected( $status, $val, false ) . '>' . esc_html( $lab ) . '</option>';
+		}
+		echo '</select></label>';
+		echo '<label>' . esc_html__( 'Search', 'post-extractor' ) . ' <input type="search" name="pe_contrib_q" value="' . esc_attr( $q ) . '" placeholder="' . esc_attr__( 'Name, email, publication…', 'post-extractor' ) . '" /></label>';
+		echo '<button type="submit" class="button">' . esc_html__( 'Filter', 'post-extractor' ) . '</button>';
+		if ( $status !== 'all' || $q !== '' ) {
+			echo ' <a class="button" href="' . esc_url( self::url_list() ) . '">' . esc_html__( 'Reset', 'post-extractor' ) . '</a>';
+		}
+		echo '</form>';
 
 		if ( $rows === [] ) {
-			echo '<p>' . esc_html__( 'No applications yet.', 'post-extractor' ) . '</p></div>';
+			echo '<p>' . esc_html__( 'No applications match this filter.', 'post-extractor' ) . '</p></div>';
 			return;
 		}
 
@@ -111,8 +283,9 @@ class Post_Extractor_Contributor_App_Admin {
 		echo '<th>' . esc_html__( 'Publication', 'post-extractor' ) . '</th>';
 		echo '<th>' . esc_html__( 'Status', 'post-extractor' ) . '</th>';
 		echo '<th>' . esc_html__( 'Submitted', 'post-extractor' ) . '</th>';
-		echo '<th>' . esc_html__( 'Preview', 'post-extractor' ) . '</th>';
+		echo '<th>' . esc_html__( 'Actions', 'post-extractor' ) . '</th>';
 		echo '</tr></thead><tbody>';
+
 		foreach ( $rows as $row ) {
 			if ( ! is_array( $row ) ) {
 				continue;
@@ -124,7 +297,9 @@ class Post_Extractor_Contributor_App_Admin {
 			$pub  = (string) ( $api['publication'] ?? '' );
 			$st   = (string) ( $api['status'] ?? '' );
 			$sub  = (string) ( $api['submittedAt'] ?? '' );
-			$u    = esc_url( self::url_detail( $id ) );
+
+			$detail = esc_url( self::url_detail( $id, self::list_query_args_from_get() ) );
+
 			echo '<tr>';
 			echo '<td>' . esc_html( (string) $id ) . '</td>';
 			echo '<td>' . esc_html( $name ) . '</td>';
@@ -132,7 +307,41 @@ class Post_Extractor_Contributor_App_Admin {
 			echo '<td>' . esc_html( $pub ) . '</td>';
 			echo '<td>' . esc_html( $st ) . '</td>';
 			echo '<td>' . esc_html( $sub ) . '</td>';
-			echo '<td><a class="button button-small" href="' . $u . '">' . esc_html__( 'Details', 'post-extractor' ) . '</a></td>';
+			echo '<td style="white-space:normal;">';
+			echo '<a class="button button-small" href="' . $detail . '">' . esc_html__( 'Details', 'post-extractor' ) . '</a> ';
+
+			if ( $st === 'pending' ) {
+				$approve_url = wp_nonce_url(
+					self::url_list( array_merge( $preserve, [
+						'pe_contrib_row_action' => 'approve',
+						'app_id'                => $id,
+					] ) ),
+					self::NONCE . '_row_' . $id
+				);
+				$reject_url = wp_nonce_url(
+					self::url_list( array_merge( $preserve, [
+						'pe_contrib_row_action' => 'reject',
+						'app_id'                => $id,
+					] ) ),
+					self::NONCE . '_row_' . $id
+				);
+				echo '<a class="button button-small button-primary" href="' . esc_url( $approve_url ) . '">' . esc_html__( 'Accept', 'post-extractor' ) . '</a> ';
+				echo '<a class="button button-small" href="' . esc_url( $reject_url ) . '">' . esc_html__( 'Reject', 'post-extractor' ) . '</a> ';
+			}
+
+			if ( self::user_can_delete_row( $row ) ) {
+				$del_url = wp_nonce_url(
+					self::url_list( array_merge( $preserve, [
+						'pe_contrib_row_action' => 'delete',
+						'app_id'                => $id,
+					] ) ),
+					self::NONCE . '_row_' . $id
+				);
+				$confirm = esc_attr__( 'Delete this application permanently?', 'post-extractor' );
+				echo '<a class="button button-small" href="' . esc_url( $del_url ) . '" onclick="return window.confirm(' . json_encode( $confirm ) . ');">' . esc_html__( 'Delete', 'post-extractor' ) . '</a>';
+			}
+
+			echo '</td>';
 			echo '</tr>';
 		}
 		echo '</tbody></table>';
@@ -141,7 +350,7 @@ class Post_Extractor_Contributor_App_Admin {
 			echo '<div class="tablenav"><div class="tablenav-pages">';
 			for ( $i = 1; $i <= $pages; $i++ ) {
 				$cls = $i === $paged ? ' class="button button-primary" style="margin:2px;"' : ' class="button" style="margin:2px;"';
-				$url = esc_url( add_query_arg( 'paged', (string) $i, self::url_list() ) );
+				$url = esc_url( self::url_list( array_merge( $preserve, [ 'paged' => $i ] ) ) );
 				echo '<a' . $cls . ' href="' . $url . '">' . esc_html( (string) $i ) . '</a>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
 			}
 			echo '</div></div>';
@@ -153,15 +362,17 @@ class Post_Extractor_Contributor_App_Admin {
 		$row = Post_Extractor_Contributor_Applications::get( $id );
 		if ( $row === null ) {
 			echo '<div class="wrap"><p>' . esc_html__( 'Application not found.', 'post-extractor' ) . '</p>';
-			echo '<p><a href="' . esc_url( self::url_list() ) . '">' . esc_html__( 'Back to list', 'post-extractor' ) . '</a></p></div>';
+			echo '<p><a href="' . esc_url( self::url_list( self::list_query_args_from_get() ) ) . '">' . esc_html__( 'Back to list', 'post-extractor' ) . '</a></p></div>';
 			return;
 		}
-		$undo = self::cancel_undo_window_seconds();
-		$api = Post_Extractor_Contributor_Applications::row_to_api_array( $row, $undo );
-		$st  = (string) ( $api['status'] ?? '' );
+		$preserve = self::list_query_args_from_get();
+		$undo     = self::cancel_undo_window_seconds();
+		$api      = Post_Extractor_Contributor_Applications::row_to_api_array( $row, $undo );
+		$st       = (string) ( $api['status'] ?? '' );
 
 		echo '<div class="wrap">';
-		echo '<p><a href="' . esc_url( self::url_list() ) . '">← ' . esc_html__( 'All applications', 'post-extractor' ) . '</a></p>';
+		echo '<p><a href="' . esc_url( self::url_list( $preserve ) ) . '">← ' . esc_html__( 'All applications', 'post-extractor' ) . '</a>';
+		echo ' · <a href="' . esc_url( admin_url( 'edit.php?post_type=' . Post_Extractor_Citizen::POST_TYPE ) ) . '">' . esc_html__( 'Citizen Submissions', 'post-extractor' ) . '</a></p>';
 		echo '<h1>' . esc_html__( 'Application preview', 'post-extractor' ) . ' #' . esc_html( (string) $id ) . '</h1>';
 
 		echo '<div class="card" style="max-width:920px;padding:16px 20px;">';
@@ -211,7 +422,7 @@ class Post_Extractor_Contributor_App_Admin {
 			wp_nonce_field( self::NONCE, 'pe_contrib_moderation_nonce' );
 			echo '<input type="hidden" name="pe_contrib_app_id" value="' . esc_attr( (string) $id ) . '" />';
 			echo '<p><button type="submit" class="button button-primary" name="pe_contrib_action" value="approve">';
-			esc_html_e( 'Approve and create contributor user', 'post-extractor' );
+			esc_html_e( 'Accept and create contributor user', 'post-extractor' );
 			echo '</button></p>';
 			echo '<p><label for="pe_contrib_reject_reason"><strong>' . esc_html__( 'Rejection message to applicant (plain text, emailed)', 'post-extractor' ) . '</strong></label></p>';
 			echo '<textarea class="widefat" rows="3" name="pe_contrib_reject_reason" id="pe_contrib_reject_reason" placeholder="' . esc_attr__( 'At least 3 characters…', 'post-extractor' ) . '"></textarea>';
@@ -219,6 +430,18 @@ class Post_Extractor_Contributor_App_Admin {
 			esc_html_e( 'Reject and notify by email', 'post-extractor' );
 			echo '</button></p>';
 			echo '</form>';
+		}
+
+		if ( self::user_can_delete_row( $row ) ) {
+			$del_url = wp_nonce_url(
+				self::url_list( array_merge( $preserve, [
+					'pe_contrib_row_action' => 'delete',
+					'app_id'                => $id,
+				] ) ),
+				self::NONCE . '_row_' . $id
+			);
+			$confirm = esc_attr__( 'Delete this application permanently?', 'post-extractor' );
+			echo '<p style="margin-top:16px;"><a class="button-link-delete" href="' . esc_url( $del_url ) . '" onclick="return window.confirm(' . json_encode( $confirm ) . ');">' . esc_html__( 'Delete application', 'post-extractor' ) . '</a></p>';
 		}
 
 		echo '</div>';
@@ -236,20 +459,32 @@ class Post_Extractor_Contributor_App_Admin {
 		echo '<tr><th scope="row">' . esc_html( $label ) . '</th><td><a href="' . esc_url( $url ) . '" target="_blank" rel="noopener noreferrer">' . esc_html( $url ) . '</a></td></tr>';
 	}
 
-	public static function admin_notice_error(): void {
-		if ( ! is_admin() || ! isset( $_GET['pe_contrib_err'] ) || ! is_string( $_GET['pe_contrib_err'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification
+	public static function admin_notices(): void {
+		if ( ! is_admin() ) {
 			return;
 		}
-		$msg = sanitize_text_field( (string) wp_unslash( (string) $_GET['pe_contrib_err'] ) );
-		if ( $msg === '' ) {
+		if ( ! isset( $_GET['page'] ) || (string) $_GET['page'] !== self::PAGE_SLUG ) { // phpcs:ignore WordPress.Security.NonceVerification
 			return;
 		}
-		$pos = (int) strpos( $msg, ':', 1 );
-		$out = ( $pos > 0 && $pos < strlen( $msg ) - 1 ) ? substr( $msg, $pos + 1 ) : $msg;
-		echo '<div class="notice notice-error is-dismissible"><p>' . esc_html( $out ) . '</p></div>';
+		if ( isset( $_GET['pe_contrib_err'] ) && is_string( $_GET['pe_contrib_err'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification
+			$msg = sanitize_text_field( (string) wp_unslash( (string) $_GET['pe_contrib_err'] ) );
+			if ( $msg !== '' ) {
+				$pos = (int) strpos( $msg, ':', 1 );
+				$out = ( $pos > 0 && $pos < strlen( $msg ) - 1 ) ? substr( $msg, $pos + 1 ) : $msg;
+				echo '<div class="notice notice-error is-dismissible"><p>' . esc_html( $out ) . '</p></div>';
+			}
+		}
+		if ( isset( $_GET['pe_contrib_msg'] ) && is_string( $_GET['pe_contrib_msg'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification
+			$msg = sanitize_text_field( (string) wp_unslash( (string) $_GET['pe_contrib_msg'] ) );
+			if ( $msg !== '' ) {
+				$type = isset( $_GET['pe_contrib_msg_typ'] ) ? sanitize_key( (string) wp_unslash( (string) $_GET['pe_contrib_msg_typ'] ) ) : 'success'; // phpcs:ignore WordPress.Security.NonceVerification
+				$cls  = $type === 'error' ? 'notice notice-error is-dismissible' : 'notice notice-success is-dismissible';
+				echo '<div class="' . esc_attr( $cls ) . '"><p>' . esc_html( $msg ) . '</p></div>';
+			}
+		}
 	}
 }
 
-// admin_menu runs before admin_init — never register this submenu from admin_init or it never appears.
-add_action( 'admin_menu', [ Post_Extractor_Contributor_App_Admin::class, 'add_menu' ], 25 );
-add_action( 'admin_notices', [ Post_Extractor_Contributor_App_Admin::class, 'admin_notice_error' ] );
+add_action( 'admin_menu', [ Post_Extractor_Contributor_App_Admin::class, 'add_menu' ], 99 );
+add_action( 'admin_init', [ Post_Extractor_Contributor_App_Admin::class, 'handle_row_actions' ], 1 );
+add_action( 'admin_notices', [ Post_Extractor_Contributor_App_Admin::class, 'admin_notices' ] );

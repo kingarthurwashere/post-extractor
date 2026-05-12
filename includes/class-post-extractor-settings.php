@@ -234,7 +234,7 @@ class Post_Extractor_Settings {
 						<?php
 						printf(
 						/* translators: 1: all citizen records, 2: all application records. */
-							esc_html__( 'All-time items stored on this site: %1$s citizen / contributor stories, %2$s contributor program applications. Numbers include every status; moderate citizen stories in the list table and applications under Contributor applications.', 'post-extractor' ),
+							esc_html__( 'All-time items stored on this site: %1$s citizen / contributor stories, %2$s contributor program applications. Numbers include every status; moderate citizen stories in Citizen Submissions and applications under the same menu → Contributor applications.', 'post-extractor' ),
 							esc_html( (string) number_format_i18n( $n_all_c ) ),
 							esc_html( (string) number_format_i18n( $n_all_a ) )
 						);
@@ -251,7 +251,7 @@ class Post_Extractor_Settings {
 						</a>
 						<a class="button" href="<?php echo esc_url( $url_app ); ?>">
 							<span class="dashicons dashicons-groups" style="margin-top:2px;"></span>
-							<?php esc_html_e( 'Open contributor applications (dashboard preview)', 'post-extractor' ); ?>
+							<?php esc_html_e( 'Open contributor applications (under Citizen Submissions)', 'post-extractor' ); ?>
 						</a>
 					</div>
 					<?php if ( ! empty( $db_stats ) ) : ?>
