@@ -168,15 +168,13 @@ class Post_Extractor_Settings {
 		$wp_core_groups = $this->discover_wp_core_endpoint_groups();
 
 		$pt_citizen = class_exists( 'Post_Extractor_Citizen' ) ? Post_Extractor_Citizen::POST_TYPE : 'pe_citizen';
-		$pt_contrib = class_exists( 'Post_Extractor_Contributor_App' ) ? Post_Extractor_Contributor_App::POST_TYPE : 'pe_contrib_app';
+		$n_pend_a   = class_exists( 'Post_Extractor_Contributor_Applications' ) ? Post_Extractor_Contributor_Applications::count_pending() : 0;
+		$n_all_a    = class_exists( 'Post_Extractor_Contributor_Applications' ) ? Post_Extractor_Contributor_Applications::count_all() : 0;
 		$cnt_cit    = wp_count_posts( $pt_citizen );
-		$cnt_app    = wp_count_posts( $pt_contrib );
 		$n_pend_c   = (int) ( is_object( $cnt_cit ) && isset( $cnt_cit->pending ) ? $cnt_cit->pending : 0 );
-		$n_pend_a   = (int) ( is_object( $cnt_app ) && isset( $cnt_app->pending ) ? $cnt_app->pending : 0 );
 		$n_all_c    = is_object( $cnt_cit ) ? (int) array_sum( (array) $cnt_cit ) : 0;
-		$n_all_a    = is_object( $cnt_app ) ? (int) array_sum( (array) $cnt_app ) : 0;
 		$url_cit    = admin_url( 'edit.php?post_type=' . $pt_citizen );
-		$url_app    = admin_url( 'edit.php?post_type=' . $pt_contrib );
+		$url_app    = class_exists( 'Post_Extractor_Contributor_App_Admin' ) ? Post_Extractor_Contributor_App_Admin::url_list() : admin_url( 'options-general.php?page=post-extractor-settings' );
 		$db_stats   = $this->get_db_diagnostics_stats();
 
 		?>
@@ -236,7 +234,7 @@ class Post_Extractor_Settings {
 						<?php
 						printf(
 						/* translators: 1: all citizen records, 2: all application records. */
-							esc_html__( 'All-time items stored on this site: %1$s citizen / contributor stories, %2$s contributor program rows. Numbers include every status; moderate in the list tables when you are ready.', 'post-extractor' ),
+							esc_html__( 'All-time items stored on this site: %1$s citizen / contributor stories, %2$s contributor program applications. Numbers include every status; moderate citizen stories in the list table and applications under Contributor applications.', 'post-extractor' ),
 							esc_html( (string) number_format_i18n( $n_all_c ) ),
 							esc_html( (string) number_format_i18n( $n_all_a ) )
 						);
@@ -253,7 +251,7 @@ class Post_Extractor_Settings {
 						</a>
 						<a class="button" href="<?php echo esc_url( $url_app ); ?>">
 							<span class="dashicons dashicons-groups" style="margin-top:2px;"></span>
-							<?php esc_html_e( 'Open contributor applications (wp-admin list)', 'post-extractor' ); ?>
+							<?php esc_html_e( 'Open contributor applications (dashboard preview)', 'post-extractor' ); ?>
 						</a>
 					</div>
 					<?php if ( ! empty( $db_stats ) ) : ?>
@@ -497,7 +495,7 @@ class Post_Extractor_Settings {
 							</tr>
 							<tr>
 								<td><span class="pe-badge pe-badge--post">POST</span></td>
-								<td><code>…/contributor-applications</code> — <?php esc_html_e( 'Apply from the app; creates a pending pe_contrib_app post.', 'post-extractor' ); ?></td>
+								<td><code>…/contributor-applications</code> — <?php esc_html_e( 'Apply from the app (JSON or multipart/form-data): contact fields, optional social URLs, optional reason, and optional introductionVideo file stored as media.', 'post-extractor' ); ?></td>
 							</tr>
 							<tr>
 								<td><span class="pe-badge pe-badge--post">POST</span></td>
@@ -521,7 +519,7 @@ class Post_Extractor_Settings {
 							</tr>
 							<tr>
 								<td><span class="pe-badge pe-badge--get">GET</span></td>
-								<td><code>…/editorial/contributor-applications</code> — <?php esc_html_e( 'Paginated pe_contrib_app for mobile screening.', 'post-extractor' ); ?></td>
+								<td><code>…/editorial/contributor-applications</code> — <?php esc_html_e( 'Paginated applications from the plugin table for mobile screening.', 'post-extractor' ); ?></td>
 							</tr>
 							<tr>
 								<td><span class="pe-badge pe-badge--post">POST</span></td>
@@ -673,6 +671,10 @@ class Post_Extractor_Settings {
 				'name' => Post_Extractor_DB::table_contributor_earnings(),
 				'updated_col' => 'credited_at',
 			],
+			[
+				'name' => Post_Extractor_DB::table_contributor_applications(),
+				'updated_col' => 'updated_at',
+			],
 		];
 
 		$out = [];
@@ -734,6 +736,10 @@ class Post_Extractor_Settings {
 			Post_Extractor_DB::table_contributor_earnings() => [
 				'columns' => [ 'application_id', 'amount', 'credited_at' ],
 				'indexes' => [ 'app_idx', 'credited_idx' ],
+			],
+			Post_Extractor_DB::table_contributor_applications() => [
+				'columns' => [ 'email', 'moderation', 'created_at', 'updated_at' ],
+				'indexes' => [ 'moderation_idx', 'email_idx', 'publication_idx', 'created_idx' ],
 			],
 		];
 

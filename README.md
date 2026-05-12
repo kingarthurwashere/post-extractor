@@ -261,7 +261,7 @@ Optional server-side filters:
 | Param | Values | Notes |
 |---|---|---|
 | `status` | `all`, `pending`, `approved`, `rejected` | Default `all` |
-| `q` | text | Matches applicant `name`, `email`, `publication` |
+| `q` | text | Matches applicant name, email, publication, reason, social URL fields |
 
 ```bash
 curl -H "X-PE-Editorial-Token: <token>" \
@@ -284,6 +284,16 @@ Optional server-side filters:
 curl -H "X-PE-Editorial-Token: <token>" \
   "https://yoursite.com/wp-json/post-extractor/v1/editorial/citizen-submissions?page=1&per_page=30&status=verified&q=bulawayo"
 ```
+
+---
+
+### `POST /contributor-applications`
+
+Creates a pending contributor application (custom table `wp_pe_contributor_applications`).
+
+**JSON** (`Content-Type: application/json`): existing fields, plus optional `facebookUrl`, `instagramUrl`, `linkedinUrl`, `twitterUrl` (must be `http(s)://` when set). `reason` / `whyJoin` is optional (max 5000 characters after strip tags).
+
+**Multipart** (`Content-Type: multipart/form-data`): same keys as strings, plus file field `introductionVideo` (video/*, max 100 MB). `publications` may be sent as a JSON-encoded string of slugs. The row stores a WordPress media attachment id; GET responses include `introductionVideoUrl` when set.
 
 ---
 

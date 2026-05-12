@@ -21,7 +21,7 @@ class Post_Extractor_Citizen {
 	/** @var string */
 	public const META_SOURCE = '_pe_submission_source';
 
-	/** @var int Approved contributor application pe_contrib_app post id (when set). */
+	/** @var int Approved contributor application id (plugin applications table row). */
 	public const META_CONTRIBUTOR_APP_ID = '_pe_contributor_app_id';
 
 	public static function register_post_type(): void {
